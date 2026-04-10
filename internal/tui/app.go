@@ -3,12 +3,16 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
 
+	"github.com/Jules-Solutions/jules-installer/internal/audit"
 	"github.com/Jules-Solutions/jules-installer/internal/auth"
+	"github.com/Jules-Solutions/jules-installer/internal/config"
 )
 
 // state represents which screen the installer is currently showing.
@@ -35,6 +39,14 @@ const (
 	authStateSuccess                  // auth complete, ready to continue
 )
 
+// setupState tracks sub-state within the setup screen.
+type setupState int
+
+const (
+	setupVaultPath  setupState = iota // user selects vault directory
+	setupConfirmMCP                   // confirm MCP configuration
+)
+
 // --- Messages ---
 
 // tickMsg drives spinner animation.
@@ -51,6 +63,11 @@ type authDoneMsg struct {
 type deviceCodeMsg struct {
 	userCode        string
 	verificationURI string
+}
+
+// auditDoneMsg is sent when the environment audit completes.
+type auditDoneMsg struct {
+	checks []audit.Check
 }
 
 // --- Model ---
@@ -79,7 +96,12 @@ type Model struct {
 	authURL string
 
 	// Audit results (populated after stateAudit).
-	auditResults []interface{} // placeholder; will be []audit.Check
+	auditResults []audit.Check
+
+	// Setup sub-state and inputs.
+	setupState      setupState
+	setupVaultInput *textinput.Model
+	setupConfigMCP  bool
 
 	// Spinner animation frame counter.
 	spinnerFrame int
@@ -98,11 +120,21 @@ func NewModel(authURL, version string) Model {
 	ti.CharLimit = 128
 	ti.Width = 60
 
+	// Vault path input with sensible default.
+	vi := textinput.New()
+	home, _ := os.UserHomeDir()
+	vi.SetValue(filepath.Join(home, "Jules.Life"))
+	vi.Placeholder = "~/Jules.Life"
+	vi.CharLimit = 256
+	vi.Width = 60
+
 	return Model{
-		state:   stateWelcome,
-		authURL: authURL,
-		version: version,
-		textInput: &ti,
+		state:           stateWelcome,
+		authURL:         authURL,
+		version:         version,
+		textInput:       &ti,
+		setupVaultInput: &vi,
+		setupConfigMCP:  true, // default yes
 	}
 }
 
@@ -141,6 +173,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deviceVerifyURI = msg.verificationURI
 		return m, nil
 
+	case auditDoneMsg:
+		m.auditResults = msg.checks
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -149,6 +185,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.state == stateAuth && m.authState == authStateAPIKey && m.textInput != nil {
 		ti, cmd := m.textInput.Update(msg)
 		m.textInput = &ti
+		return m, cmd
+	}
+
+	// Delegate text input events when on setup vault path screen.
+	if m.state == stateSetup && m.setupState == setupVaultPath && m.setupVaultInput != nil {
+		vi, cmd := m.setupVaultInput.Update(msg)
+		m.setupVaultInput = &vi
 		return m, cmd
 	}
 
@@ -237,16 +280,77 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case authStateSuccess:
 			switch msg.String() {
 			case "enter", " ":
-				// Advance to audit (stub — goes directly to done for now).
-				m.state = stateDone
-				return m, nil
+				// Save API key to config before advancing.
+				cfg := config.DefaultConfig()
+				cfg.Auth.APIKey = m.apiKey
+				cfg.Auth.AuthURL = m.authURL
+				if err := config.SaveConfig(cfg); err != nil {
+					m.err = fmt.Errorf("saving config: %w", err)
+					m.state = stateError
+					return m, nil
+				}
+				// Start the environment audit.
+				m.state = stateAudit
+				return m, m.runAuditCmd()
 			case "q", "ctrl+c":
 				return m, tea.Quit
 			}
 		}
 
-	case stateAudit, stateSetup, stateDownload, stateConfig:
-		// Stub states just pass through on Enter.
+	case stateAudit:
+		// Wait for audit results, then Enter to continue.
+		if len(m.auditResults) > 0 {
+			switch msg.String() {
+			case "enter", " ":
+				m.state = stateSetup
+				m.setupState = setupVaultPath
+				if m.setupVaultInput != nil {
+					m.setupVaultInput.Focus()
+				}
+				return m, nil
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+		} else {
+			if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+		}
+
+	case stateSetup:
+		switch m.setupState {
+		case setupVaultPath:
+			switch msg.String() {
+			case "enter":
+				// Vault path confirmed, move to MCP question.
+				m.setupState = setupConfirmMCP
+				return m, nil
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+			// Other keys handled by textinput delegate above.
+
+		case setupConfirmMCP:
+			switch msg.String() {
+			case "left", "right", "h", "l", "tab":
+				m.setupConfigMCP = !m.setupConfigMCP
+				return m, nil
+			case "y":
+				m.setupConfigMCP = true
+				return m, nil
+			case "n":
+				m.setupConfigMCP = false
+				return m, nil
+			case "enter":
+				// Save full config and advance to done.
+				return m.finishSetup()
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+		}
+
+	case stateDownload, stateConfig:
+		// Still stubs — skip through.
 		switch msg.String() {
 		case "enter", " ":
 			m.state++
@@ -346,6 +450,35 @@ func (m Model) runAPIKeyFlowCmd(key string) tea.Cmd {
 		validated, err := auth.APIKeyFlowPublic(authURL, key)
 		return authDoneMsg{apiKey: validated, method: auth.MethodAPIKey, err: err}
 	}
+}
+
+// runAuditCmd runs all environment checks in a background goroutine.
+func (m Model) runAuditCmd() tea.Cmd {
+	return func() tea.Msg {
+		return auditDoneMsg{checks: audit.RunAudit()}
+	}
+}
+
+// finishSetup saves the final config from all collected answers and advances to Done.
+func (m Model) finishSetup() (tea.Model, tea.Cmd) {
+	vaultPath := ""
+	if m.setupVaultInput != nil {
+		vaultPath = m.setupVaultInput.Value()
+	}
+
+	cfg, _ := config.LoadConfig()
+	cfg.Auth.APIKey = m.apiKey
+	cfg.Auth.AuthURL = m.authURL
+	cfg.Auth.APIURL = "https://api.jules.solutions"
+	cfg.Local.VaultPath = vaultPath
+	if err := config.SaveConfig(cfg); err != nil {
+		m.err = fmt.Errorf("saving config: %w", err)
+		m.state = stateError
+		return m, nil
+	}
+
+	m.state = stateDone
+	return m, nil
 }
 
 // tickCmd returns a command that fires a tickMsg after a short interval,

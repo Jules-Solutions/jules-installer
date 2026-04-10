@@ -1,18 +1,27 @@
-// Package audit — disk.go checks available disk space for the vault download.
+// Package audit — disk.go provides shared disk check helpers.
+// Platform-specific CheckDisk() implementations are in disk_unix.go and disk_windows.go.
 package audit
 
-// CheckDisk verifies there is sufficient free disk space for the vault.
-//
-// TODO(Phase 2): implement real check using:
-//
-//   - On Unix: syscall.Statfs(path, &stat) → stat.Bavail * uint64(stat.Bsize)
-//   - On Windows: windows.GetDiskFreeSpaceEx(path, ...)
-//
-// Warn if free space < 2 GB. Fail if < 500 MB.
-func CheckDisk() Check {
-	return Check{
-		Name:   "Disk Space",
-		Status: StatusSkip,
-		Detail: "TODO: check free disk space at vault install path (need ≥ 2 GB free)",
+import (
+	"fmt"
+	"os"
+)
+
+// formatBytes returns a human-readable size string.
+func formatBytes(b uint64) string {
+	const gb = 1024 * 1024 * 1024
+	if b >= gb {
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
 	}
+	const mb = 1024 * 1024
+	return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
+}
+
+// diskCheckPath returns the path to check disk space on.
+func diskCheckPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return home
 }

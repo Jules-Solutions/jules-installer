@@ -4,6 +4,9 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/Jules-Solutions/jules-installer/internal/audit"
+	"github.com/Jules-Solutions/jules-installer/internal/config"
 )
 
 // renderWelcome renders the welcome / splash screen.
@@ -108,16 +111,101 @@ func renderAuth(m Model) string {
 	return sb.String()
 }
 
-// renderAudit renders the environment audit screen (stub).
-func renderAudit(_ Model) string {
-	return "\n" + titleStyle.Render("  Environment Audit") + "\n\n" +
-		mutedStyle.Render("  Coming soon — environment checks will appear here.") + "\n"
+// renderAudit renders the environment audit screen with real check results.
+func renderAudit(m Model) string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("  Environment Audit"))
+	sb.WriteString("\n")
+	if m.width > 4 {
+		sb.WriteString(HRule(m.width - 4))
+	}
+	sb.WriteString("\n\n")
+
+	if len(m.auditResults) == 0 {
+		sb.WriteString("  " + SpinnerWithMessage(m.spinnerFrame, "Scanning environment…"))
+		return sb.String()
+	}
+
+	for _, c := range m.auditResults {
+		detail := c.Version
+		if c.Detail != "" {
+			if detail != "" {
+				detail += " — " + c.Detail
+			} else {
+				detail = c.Detail
+			}
+		}
+		sb.WriteString("  " + StatusLine(c.Status, fmt.Sprintf("%-14s", c.Name), detail) + "\n")
+	}
+
+	// Summary line.
+	pass, fail, warn := 0, 0, 0
+	for _, c := range m.auditResults {
+		switch c.Status {
+		case audit.StatusPass:
+			pass++
+		case audit.StatusFail:
+			fail++
+		case audit.StatusWarn:
+			warn++
+		}
+	}
+	sb.WriteString("\n")
+	summary := fmt.Sprintf("  %d passed", pass)
+	if warn > 0 {
+		summary += fmt.Sprintf(", %d warnings", warn)
+	}
+	if fail > 0 {
+		summary += fmt.Sprintf(", %d failed", fail)
+	}
+	sb.WriteString(mutedStyle.Render(summary))
+	sb.WriteString("\n\n")
+	sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to continue…"))
+
+	return sb.String()
 }
 
-// renderSetup renders the setup questions screen (stub).
-func renderSetup(_ Model) string {
-	return "\n" + titleStyle.Render("  Setup") + "\n\n" +
-		mutedStyle.Render("  Coming soon — vault path and preferences will appear here.") + "\n"
+// renderSetup renders the interactive setup questions.
+func renderSetup(m Model) string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("  Setup"))
+	sb.WriteString("\n")
+	if m.width > 4 {
+		sb.WriteString(HRule(m.width - 4))
+	}
+	sb.WriteString("\n\n")
+
+	switch m.setupState {
+	case setupVaultPath:
+		sb.WriteString("  " + subtitleStyle.Render("Where should we put your vault?"))
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("The vault contains your notes, projects, and agent configuration."))
+		sb.WriteString("\n  " + mutedStyle.Render("It's a git repo — you can move it later."))
+		sb.WriteString("\n\n")
+		if m.setupVaultInput != nil {
+			sb.WriteString("  " + m.setupVaultInput.View())
+		}
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to confirm"))
+
+	case setupConfirmMCP:
+		sb.WriteString("  " + subtitleStyle.Render("Configure Claude Code MCP connection?"))
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("This will add jules.solutions as an MCP server when your vault is set up."))
+		sb.WriteString("\n  " + mutedStyle.Render("Your API key is read from config — no secrets in the MCP config file."))
+		sb.WriteString("\n\n")
+		if m.setupConfigMCP {
+			sb.WriteString("  " + highlightStyle.Render("> Yes") + "    " + mutedStyle.Render("  No"))
+		} else {
+			sb.WriteString("  " + mutedStyle.Render("  Yes") + "    " + highlightStyle.Render("> No"))
+		}
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("← → to choose, ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to confirm"))
+	}
+
+	return sb.String()
 }
 
 // renderDownload renders the vault download progress screen (stub).
@@ -132,18 +220,49 @@ func renderConfig(_ Model) string {
 		mutedStyle.Render("  Coming soon — config writing will appear here.") + "\n"
 }
 
-// renderDone renders the completion / handoff screen.
+// renderDone renders the completion screen with an honest summary.
 func renderDone(m Model) string {
 	var sb strings.Builder
 	sb.WriteString("\n")
-	sb.WriteString(successStyle.Render("  ✓ Setup Complete!"))
+	sb.WriteString(successStyle.Render("  ✓ Setup Complete"))
 	sb.WriteString("\n\n")
-	sb.WriteString(bodyStyle.Render("  Jules.Solutions is ready. Claude Code has been configured."))
+
+	// What was done.
+	sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Authenticated via ") + highlightStyle.Render(string(m.authMethod)))
+	sb.WriteString("\n")
+
+	configPath, _ := config.ConfigPath()
+	sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("API key saved to ") + mutedStyle.Render(configPath))
+	sb.WriteString("\n")
+
+	if len(m.auditResults) > 0 {
+		pass := 0
+		for _, c := range m.auditResults {
+			if c.Status == audit.StatusPass {
+				pass++
+			}
+		}
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render(fmt.Sprintf("Environment audited (%d/%d checks passed)", pass, len(m.auditResults))))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("  " + mutedStyle.Render("⟳") + " " + bodyStyle.Render("Vault download — coming in next release"))
 	sb.WriteString("\n\n")
-	sb.WriteString(mutedStyle.Render("  Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" or ") +
+
+	// Next steps.
+	sb.WriteString(subtitleStyle.Render("  Next steps:"))
+	sb.WriteString("\n")
+	sb.WriteString("  " + bodyStyle.Render("  1. Your API key is saved — CLI tools will pick it up automatically"))
+	sb.WriteString("\n")
+	sb.WriteString("  " + bodyStyle.Render("  2. Install missing tools shown in the audit (if any)"))
+	sb.WriteString("\n")
+	sb.WriteString("  " + bodyStyle.Render("  3. Vault download will be available in the next release"))
+	sb.WriteString("\n\n")
+
+	sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" or ") +
 		highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
 	sb.WriteString("\n")
-	_ = m
+
 	return sb.String()
 }
 

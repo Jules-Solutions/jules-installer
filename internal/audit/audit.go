@@ -17,17 +17,37 @@ type Check struct {
 	Detail  string // Additional detail or error message
 }
 
-// RunAudit runs all environment checks and returns their results.
-// Checks are run in parallel where safe; results are returned in display order.
+// RunAudit runs all environment checks concurrently and returns their results
+// in a fixed display order.
 func RunAudit() []Check {
-	// Collect results from all sub-checkers.
-	platform := CheckPlatform()
-
-	checks := []Check{
-		platform,
-		CheckGit(),
-		CheckDisk(),
+	type indexedCheck struct {
+		idx   int
+		check Check
 	}
 
+	fns := []func() Check{
+		CheckPlatform, // 0
+		CheckGit,      // 1
+		CheckDocker,   // 2
+		CheckPython,   // 3
+		CheckNode,     // 4
+		CheckClaude,   // 5
+		CheckEditors,  // 6
+		CheckSSH,      // 7
+		CheckDisk,     // 8
+	}
+
+	ch := make(chan indexedCheck, len(fns))
+	for i, fn := range fns {
+		go func(idx int, f func() Check) {
+			ch <- indexedCheck{idx, f()}
+		}(i, fn)
+	}
+
+	checks := make([]Check, len(fns))
+	for range fns {
+		r := <-ch
+		checks[r.idx] = r.check
+	}
 	return checks
 }
