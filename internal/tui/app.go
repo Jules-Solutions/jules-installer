@@ -3,8 +3,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -122,9 +120,8 @@ func NewModel(authURL, version string) Model {
 
 	// Vault path input with sensible default.
 	vi := textinput.New()
-	home, _ := os.UserHomeDir()
-	vi.SetValue(filepath.Join(home, "Jules.Life"))
-	vi.Placeholder = "~/Jules.Life"
+	vi.SetValue(config.DefaultVaultPath())
+	vi.Placeholder = "~/{Name}.Life"
 	vi.CharLimit = 256
 	vi.Width = 60
 

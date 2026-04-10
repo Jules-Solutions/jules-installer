@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -112,14 +113,28 @@ func SaveConfig(cfg Config) error {
 
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
-	home, _ := os.UserHomeDir()
 	return Config{
 		Auth: AuthConfig{
 			APIURL:  "https://api.jules.solutions",
 			AuthURL: "https://auth.jules.solutions",
 		},
 		Local: LocalConfig{
-			VaultPath: filepath.Join(home, "Jules.Life"),
+			VaultPath: DefaultVaultPath(),
 		},
 	}
+}
+
+// DefaultVaultPath returns the recommended vault location: ~/{Username}.Life
+// Uses the OS username (last component of the home directory path).
+func DefaultVaultPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "My.Life"
+	}
+	username := filepath.Base(home) // e.g. "felix" from /home/felix or C:\Users\felix
+	// Capitalize first letter for the directory name.
+	if len(username) > 0 {
+		username = strings.ToUpper(username[:1]) + username[1:]
+	}
+	return filepath.Join(home, username+".Life")
 }

@@ -4,6 +4,8 @@ package setup
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/Jules-Solutions/jules-installer/internal/config"
 )
 
 // Answers holds the user's responses to setup questions.
@@ -15,9 +17,8 @@ type Answers struct {
 // DefaultAnswers returns pre-filled defaults for all setup questions.
 // These are shown to the user as editable suggestions.
 func DefaultAnswers() Answers {
-	home, _ := os.UserHomeDir()
 	return Answers{
-		VaultPath: filepath.Join(home, "Jules.Life"),
+		VaultPath: config.DefaultVaultPath(),
 		Shell:     detectDefaultShell(),
 	}
 }
