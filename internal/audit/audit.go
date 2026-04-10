@@ -1,6 +1,12 @@
 // Package audit detects the user's development environment before installation.
 package audit
 
+import (
+	"fmt"
+	"os/exec"
+	"runtime"
+)
+
 // Status values for a Check result.
 const (
 	StatusPass = "pass"
@@ -15,6 +21,16 @@ type Check struct {
 	Status  string // One of: pass, fail, warn, skip
 	Version string // Detected version string, empty if not found
 	Detail  string // Additional detail or error message
+}
+
+// Installable returns true if there's an install function for this check
+// and it needs installing (status is fail or warn).
+func (c Check) Installable() bool {
+	if c.Status == StatusPass || c.Status == StatusSkip {
+		return false
+	}
+	_, ok := installers[c.Name]
+	return ok
 }
 
 // RunAudit runs all environment checks concurrently and returns their results
@@ -50,4 +66,229 @@ func RunAudit() []Check {
 		checks[r.idx] = r.check
 	}
 	return checks
+}
+
+// CountInstallable returns how many checks can be auto-installed.
+func CountInstallable(checks []Check) int {
+	n := 0
+	for _, c := range checks {
+		if c.Installable() {
+			n++
+		}
+	}
+	return n
+}
+
+// InstallResult holds the outcome of an install attempt.
+type InstallResult struct {
+	Name    string
+	Success bool
+	Detail  string
+}
+
+// InstallMissing runs the installer for every check that needs it.
+// Returns results in the same order.
+func InstallMissing(checks []Check) []InstallResult {
+	var results []InstallResult
+	for _, c := range checks {
+		if !c.Installable() {
+			continue
+		}
+		fn := installers[c.Name]
+		err := fn()
+		if err != nil {
+			results = append(results, InstallResult{Name: c.Name, Success: false, Detail: err.Error()})
+		} else {
+			results = append(results, InstallResult{Name: c.Name, Success: true, Detail: "installed"})
+		}
+	}
+	return results
+}
+
+// --- Installer registry ---
+// Each audit file registers its install function here.
+
+var installers = map[string]func() error{
+	"Git":         installGit,
+	"Docker":      installDocker,
+	"Python":      installPython,
+	"Node.js":     installNode,
+	"Claude Code": installClaude,
+	"Editors":     installEditors,
+	"SSH Keys":    installSSHKeys,
+}
+
+// --- Platform install helpers ---
+
+// runInstallCmd runs a command and returns a friendly error if it fails.
+func runInstallCmd(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w\n%s", name, err, string(out))
+	}
+	return nil
+}
+
+// hasCommand checks if a command is available on PATH.
+func hasCommand(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+// --- Per-tool install functions ---
+
+func installGit() error {
+	switch runtime.GOOS {
+	case "windows":
+		return runInstallCmd("winget", "install", "--id", "Git.Git", "-e", "--accept-source-agreements", "--accept-package-agreements")
+	case "darwin":
+		if hasCommand("brew") {
+			return runInstallCmd("brew", "install", "git")
+		}
+		// xcode-select --install triggers git install on macOS
+		return runInstallCmd("xcode-select", "--install")
+	default:
+		if hasCommand("apt-get") {
+			return runInstallCmd("sudo", "apt-get", "install", "-y", "git")
+		}
+		if hasCommand("dnf") {
+			return runInstallCmd("sudo", "dnf", "install", "-y", "git")
+		}
+		return fmt.Errorf("install git manually: https://git-scm.com")
+	}
+}
+
+func installDocker() error {
+	switch runtime.GOOS {
+	case "windows":
+		return runInstallCmd("winget", "install", "--id", "Docker.DockerDesktop", "-e", "--accept-source-agreements", "--accept-package-agreements")
+	case "darwin":
+		if hasCommand("brew") {
+			return runInstallCmd("brew", "install", "--cask", "docker")
+		}
+		return fmt.Errorf("install Docker Desktop: https://docker.com/get-started")
+	default:
+		// Docker's official install script
+		return fmt.Errorf("install Docker: https://docs.docker.com/engine/install/")
+	}
+}
+
+func installPython() error {
+	switch runtime.GOOS {
+	case "windows":
+		// Install Python, then uv
+		if err := runInstallCmd("winget", "install", "--id", "Python.Python.3.13", "-e", "--accept-source-agreements", "--accept-package-agreements"); err != nil {
+			return err
+		}
+		// Install uv
+		return runInstallCmd("powershell", "-Command", "irm https://astral.sh/uv/install.ps1 | iex")
+	case "darwin":
+		if hasCommand("brew") {
+			if err := runInstallCmd("brew", "install", "python"); err != nil {
+				return err
+			}
+		}
+		// Install uv via curl
+		return runInstallCmd("sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh")
+	default:
+		if hasCommand("apt-get") {
+			if err := runInstallCmd("sudo", "apt-get", "install", "-y", "python3", "python3-pip"); err != nil {
+				return err
+			}
+		}
+		// Install uv
+		return runInstallCmd("sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh")
+	}
+}
+
+func installNode() error {
+	switch runtime.GOOS {
+	case "windows":
+		if err := runInstallCmd("winget", "install", "--id", "OpenJS.NodeJS.LTS", "-e", "--accept-source-agreements", "--accept-package-agreements"); err != nil {
+			return err
+		}
+		// pnpm via corepack
+		return runInstallCmd("corepack", "enable")
+	case "darwin":
+		if hasCommand("brew") {
+			if err := runInstallCmd("brew", "install", "node"); err != nil {
+				return err
+			}
+			return runInstallCmd("corepack", "enable")
+		}
+		return fmt.Errorf("install Node.js: https://nodejs.org")
+	default:
+		if hasCommand("apt-get") {
+			if err := runInstallCmd("sudo", "apt-get", "install", "-y", "nodejs", "npm"); err != nil {
+				return err
+			}
+			return runInstallCmd("corepack", "enable")
+		}
+		return fmt.Errorf("install Node.js: https://nodejs.org")
+	}
+}
+
+func installClaude() error {
+	// Claude Code is installed via npm globally.
+	if !hasCommand("npm") {
+		return fmt.Errorf("npm required — install Node.js first, then: npm install -g @anthropic-ai/claude-code")
+	}
+	return runInstallCmd("npm", "install", "-g", "@anthropic-ai/claude-code")
+}
+
+func installEditors() error {
+	// Install Obsidian (recommended) + VS Code.
+	var lastErr error
+	switch runtime.GOOS {
+	case "windows":
+		// Try both — either failing is not fatal.
+		if err := runInstallCmd("winget", "install", "--id", "Obsidian.Obsidian", "-e", "--accept-source-agreements", "--accept-package-agreements"); err != nil {
+			lastErr = err
+		}
+		if err := runInstallCmd("winget", "install", "--id", "Microsoft.VisualStudioCode", "-e", "--accept-source-agreements", "--accept-package-agreements"); err != nil {
+			lastErr = err
+		}
+	case "darwin":
+		if hasCommand("brew") {
+			if err := runInstallCmd("brew", "install", "--cask", "obsidian"); err != nil {
+				lastErr = err
+			}
+			if err := runInstallCmd("brew", "install", "--cask", "visual-studio-code"); err != nil {
+				lastErr = err
+			}
+		} else {
+			return fmt.Errorf("install Homebrew first: https://brew.sh")
+		}
+	default:
+		return fmt.Errorf("install Obsidian: https://obsidian.md — VS Code: https://code.visualstudio.com")
+	}
+	return lastErr
+}
+
+func installSSHKeys() error {
+	// Generate an ed25519 key with no passphrase (user can add one later).
+	if hasCommand("ssh-keygen") {
+		home, _ := exec.Command("sh", "-c", "echo $HOME").Output()
+		if runtime.GOOS == "windows" {
+			// Windows ssh-keygen
+			return runInstallCmd("ssh-keygen", "-t", "ed25519", "-N", "", "-f",
+				fmt.Sprintf("%s\\.ssh\\id_ed25519", getHomeDir()))
+		}
+		_ = home
+		return runInstallCmd("ssh-keygen", "-t", "ed25519", "-N", "", "-f",
+			fmt.Sprintf("%s/.ssh/id_ed25519", getHomeDir()))
+	}
+	return fmt.Errorf("ssh-keygen not found — install OpenSSH")
+}
+
+func getHomeDir() string {
+	if h, err := exec.Command("sh", "-c", "echo $HOME").Output(); err == nil {
+		s := string(h)
+		if len(s) > 0 && s[len(s)-1] == '\n' {
+			s = s[:len(s)-1]
+		}
+		return s
+	}
+	return "~"
 }

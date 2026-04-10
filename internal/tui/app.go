@@ -68,6 +68,21 @@ type auditDoneMsg struct {
 	checks []audit.Check
 }
 
+// installDoneMsg is sent when auto-install completes.
+type installDoneMsg struct {
+	results []audit.InstallResult
+}
+
+// auditSubState tracks sub-state within the audit screen.
+type auditSubState int
+
+const (
+	auditShowResults  auditSubState = iota // showing check results
+	auditOfferInstall                      // asking "install missing?"
+	auditInstalling                        // running installs
+	auditRecheck                           // re-auditing after install
+)
+
 // --- Model ---
 
 // Model is the root Bubbletea model for the installer.
@@ -93,8 +108,10 @@ type Model struct {
 	// Auth service base URL.
 	authURL string
 
-	// Audit results (populated after stateAudit).
-	auditResults []audit.Check
+	// Audit results and install state.
+	auditResults   []audit.Check
+	auditSubState  auditSubState
+	installResults []audit.InstallResult
 
 	// Setup sub-state and inputs.
 	setupState      setupState
@@ -172,7 +189,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case auditDoneMsg:
 		m.auditResults = msg.checks
+		// If installable items exist, offer to install. Otherwise show results.
+		if audit.CountInstallable(msg.checks) > 0 {
+			m.auditSubState = auditOfferInstall
+		} else {
+			m.auditSubState = auditShowResults
+		}
 		return m, nil
+
+	case installDoneMsg:
+		m.installResults = msg.results
+		// Re-audit after install to show updated results.
+		m.auditSubState = auditRecheck
+		return m, m.runAuditCmd()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -295,20 +324,40 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case stateAudit:
-		// Wait for audit results, then Enter to continue.
-		if len(m.auditResults) > 0 {
+		switch m.auditSubState {
+		case auditOfferInstall:
 			switch msg.String() {
-			case "enter", " ":
-				m.state = stateSetup
-				m.setupState = setupVaultPath
-				if m.setupVaultInput != nil {
-					m.setupVaultInput.Focus()
-				}
+			case "y", "Y":
+				// User wants to install missing tools.
+				m.auditSubState = auditInstalling
+				return m, m.runInstallCmd()
+			case "n", "N", "enter", " ":
+				// Skip install, continue to setup.
+				m.auditSubState = auditShowResults
 				return m, nil
-			case "q", "ctrl+c":
+			case "ctrl+c":
 				return m, tea.Quit
 			}
-		} else {
+
+		case auditShowResults, auditRecheck:
+			if len(m.auditResults) > 0 {
+				switch msg.String() {
+				case "enter", " ":
+					m.state = stateSetup
+					m.setupState = setupVaultPath
+					if m.setupVaultInput != nil {
+						m.setupVaultInput.Focus()
+					}
+					return m, nil
+				case "q", "ctrl+c":
+					return m, tea.Quit
+				}
+			} else if msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+
+		case auditInstalling:
+			// Busy installing — only allow quit.
 			if msg.String() == "ctrl+c" {
 				return m, tea.Quit
 			}
@@ -453,6 +502,15 @@ func (m Model) runAPIKeyFlowCmd(key string) tea.Cmd {
 func (m Model) runAuditCmd() tea.Cmd {
 	return func() tea.Msg {
 		return auditDoneMsg{checks: audit.RunAudit()}
+	}
+}
+
+// runInstallCmd runs auto-install for all missing tools in the background.
+func (m Model) runInstallCmd() tea.Cmd {
+	checks := m.auditResults
+	return func() tea.Msg {
+		results := audit.InstallMissing(checks)
+		return installDoneMsg{results: results}
 	}
 }
 

@@ -127,6 +127,7 @@ func renderAudit(m Model) string {
 		return sb.String()
 	}
 
+	// Show check results.
 	for _, c := range m.auditResults {
 		detail := c.Version
 		if c.Detail != "" {
@@ -161,7 +162,36 @@ func renderAudit(m Model) string {
 	}
 	sb.WriteString(mutedStyle.Render(summary))
 	sb.WriteString("\n\n")
-	sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to continue…"))
+
+	// Show install results if we just ran installers.
+	if len(m.installResults) > 0 {
+		sb.WriteString(subtitleStyle.Render("  Install results:"))
+		sb.WriteString("\n")
+		for _, r := range m.installResults {
+			if r.Success {
+				sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render(r.Name) + " " + mutedStyle.Render(r.Detail) + "\n")
+			} else {
+				sb.WriteString("  " + errorStyle.Render("✗") + " " + bodyStyle.Render(r.Name) + " " + mutedStyle.Render(r.Detail) + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// State-dependent prompt.
+	switch m.auditSubState {
+	case auditOfferInstall:
+		installable := audit.CountInstallable(m.auditResults)
+		sb.WriteString("  " + highlightStyle.Render(fmt.Sprintf("%d tools can be auto-installed.", installable)))
+		sb.WriteString("\n")
+		sb.WriteString("  " + bodyStyle.Render("Install them now? ") +
+			highlightStyle.Render("y") + mutedStyle.Render("/") + highlightStyle.Render("n"))
+
+	case auditInstalling:
+		sb.WriteString("  " + SpinnerWithMessage(m.spinnerFrame, "Installing missing tools… (this may take a minute)"))
+
+	default: // auditShowResults, auditRecheck
+		sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to continue…"))
+	}
 
 	return sb.String()
 }
