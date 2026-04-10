@@ -14,6 +14,7 @@ const (
 	MethodBrowser  Method = "browser"
 	MethodDevice   Method = "device_code"
 	MethodAPIKey   Method = "api_key_paste"
+	MethodExisting Method = "existing_config"
 	MethodFailed   Method = "failed"
 )
 

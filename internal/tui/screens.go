@@ -238,16 +238,47 @@ func renderSetup(m Model) string {
 	return sb.String()
 }
 
-// renderDownload renders the vault download progress screen (stub).
-func renderDownload(_ Model) string {
-	return "\n" + titleStyle.Render("  Downloading Vault") + "\n\n" +
-		mutedStyle.Render("  Coming soon — download progress will appear here.") + "\n"
+// renderDownload renders the vault download progress screen.
+func renderDownload(m Model) string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("  Vault Setup"))
+	sb.WriteString("\n")
+	if m.width > 4 {
+		sb.WriteString(HRule(m.width - 4))
+	}
+	sb.WriteString("\n\n")
+
+	if m.vaultDownloadMethod == "" {
+		// Still in progress.
+		sb.WriteString("  " + SpinnerWithMessage(m.spinnerFrame, "Setting up your vault…"))
+		return sb.String()
+	}
+
+	// Done — show result.
+	switch m.vaultDownloadMethod {
+	case "existing":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault already exists — skipped download"))
+	case "git_clone":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault cloned from GitHub"))
+	case "scaffold":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Fresh vault scaffolded"))
+	}
+	sb.WriteString("\n")
+
+	if m.vaultDownloadErr != nil {
+		sb.WriteString("  " + warningStyle.Render("!") + " " + mutedStyle.Render(m.vaultDownloadErr.Error()))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
-// renderConfig renders the config writing screen (stub).
-func renderConfig(_ Model) string {
+// renderConfig renders the config writing screen.
+func renderConfig(m Model) string {
+	_ = m
 	return "\n" + titleStyle.Render("  Writing Configuration") + "\n\n" +
-		mutedStyle.Render("  Coming soon — config writing will appear here.") + "\n"
+		SpinnerWithMessage(0, "Writing config files…") + "\n"
 }
 
 // renderDone renders the completion screen with an honest summary.
@@ -276,17 +307,41 @@ func renderDone(m Model) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("  " + mutedStyle.Render("⟳") + " " + bodyStyle.Render("Vault download — coming in next release"))
-	sb.WriteString("\n\n")
+	// Vault status.
+	switch m.vaultDownloadMethod {
+	case "existing":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault already set up"))
+	case "git_clone":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault cloned from GitHub"))
+	case "scaffold":
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Fresh vault scaffolded"))
+	default:
+		sb.WriteString("  " + mutedStyle.Render("⟳") + " " + bodyStyle.Render("Vault not yet downloaded"))
+	}
+	sb.WriteString("\n")
+
+	if m.setupConfigMCP {
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("MCP config written (.mcp.json)"))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
 
 	// Next steps.
+	vaultPath := ""
+	if m.setupVaultInput != nil {
+		vaultPath = m.setupVaultInput.Value()
+	}
 	sb.WriteString(subtitleStyle.Render("  Next steps:"))
 	sb.WriteString("\n")
-	sb.WriteString("  " + bodyStyle.Render("  1. Your API key is saved — CLI tools will pick it up automatically"))
-	sb.WriteString("\n")
-	sb.WriteString("  " + bodyStyle.Render("  2. Install missing tools shown in the audit (if any)"))
-	sb.WriteString("\n")
-	sb.WriteString("  " + bodyStyle.Render("  3. Vault download will be available in the next release"))
+	if vaultPath != "" {
+		sb.WriteString("  " + bodyStyle.Render("  1. cd "+vaultPath))
+		sb.WriteString("\n")
+		sb.WriteString("  " + bodyStyle.Render("  2. claude  (start Claude Code in your vault)"))
+	} else {
+		sb.WriteString("  " + bodyStyle.Render("  1. Your API key is saved — CLI tools will pick it up automatically"))
+		sb.WriteString("\n")
+		sb.WriteString("  " + bodyStyle.Render("  2. Run claude in your vault directory"))
+	}
 	sb.WriteString("\n\n")
 
 	sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" or ") +

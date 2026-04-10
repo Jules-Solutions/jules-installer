@@ -1,37 +1,56 @@
-// Package setup — config.go writes the final config file and Claude Code MCP config.
+// Package setup — config.go writes the MCP config and Claude Code settings.
 package setup
 
 import (
-	"fmt"
-
-	"github.com/Jules-Solutions/jules-installer/internal/config"
+	"encoding/json"
+	"os"
+	"path/filepath"
 )
 
-// WriteInstallerConfig saves the completed config to disk.
+// WriteMCPConfig writes .mcp.json into the vault root so Claude Code
+// auto-connects to the jules-local MCP server.
 //
-// TODO(Phase 2): also write the Claude Code .mcp.json pointing at jules-local.
-func WriteInstallerConfig(cfg config.Config) error {
-	// Stub: log intent but do not write.
-	fmt.Printf("[stub] would write config: auth.api_url=%s vault=%s\n",
-		cfg.Auth.APIURL, cfg.Local.VaultPath)
-	return nil
-}
+// The API key is NOT stored here — jules-local reads it from
+// ~/.config/jules/config.toml at runtime.
+func WriteMCPConfig(vaultPath string) error {
+	mcpConfig := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"jules": map[string]interface{}{
+				"command": "jules-local",
+				"args":    []string{"mcp", "--vault", "."},
+				"env": map[string]string{
+					"JULES_CONFIG": "~/.config/jules/config.toml",
+				},
+			},
+		},
+	}
 
-// WriteMCPConfig writes the .mcp.json file into the vault root so Claude Code
-// connects to the local jules-local MCP server.
-//
-// TODO(Phase 2): implement using encoding/json to write:
-//
-//	{
-//	  "mcpServers": {
-//	    "jules-local": {
-//	      "command": "jules-local",
-//	      "args": ["mcp"],
-//	      "env": { "JULES_API_KEY": "<key>" }
-//	    }
-//	  }
-//	}
-func WriteMCPConfig(vaultPath, apiKey string) error {
-	fmt.Printf("[stub] would write .mcp.json in %s\n", vaultPath)
+	data, err := json.MarshalIndent(mcpConfig, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	mcpPath := filepath.Join(vaultPath, ".mcp.json")
+	if err := os.WriteFile(mcpPath, data, 0o644); err != nil {
+		return err
+	}
+
+	// Also write a minimal .claude/settings.json if it doesn't exist.
+	settingsPath := filepath.Join(vaultPath, ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		settings := map[string]interface{}{
+			"permissions": map[string]interface{}{
+				"allow": []string{},
+				"deny":  []string{},
+			},
+		}
+		sData, _ := json.MarshalIndent(settings, "", "  ")
+		sData = append(sData, '\n')
+		// Ensure .claude/ dir exists.
+		_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
+		_ = os.WriteFile(settingsPath, sData, 0o644)
+	}
+
 	return nil
 }

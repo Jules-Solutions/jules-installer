@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,6 +12,7 @@ import (
 	"github.com/Jules-Solutions/jules-installer/internal/audit"
 	"github.com/Jules-Solutions/jules-installer/internal/auth"
 	"github.com/Jules-Solutions/jules-installer/internal/config"
+	"github.com/Jules-Solutions/jules-installer/internal/setup"
 )
 
 // state represents which screen the installer is currently showing.
@@ -73,6 +75,12 @@ type installDoneMsg struct {
 	results []audit.InstallResult
 }
 
+// vaultDownloadMsg is sent when vault download/scaffold completes.
+type vaultDownloadMsg struct {
+	method string // "git_clone", "scaffold", "existing"
+	err    error
+}
+
 // auditSubState tracks sub-state within the audit screen.
 type auditSubState int
 
@@ -117,6 +125,10 @@ type Model struct {
 	setupState      setupState
 	setupVaultInput *textinput.Model
 	setupConfigMCP  bool
+
+	// Vault download result.
+	vaultDownloadMethod string // "git_clone", "scaffold", "existing", ""
+	vaultDownloadErr    error
 
 	// Spinner animation frame counter.
 	spinnerFrame int
@@ -202,6 +214,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-audit after install to show updated results.
 		m.auditSubState = auditRecheck
 		return m, m.runAuditCmd()
+
+	case vaultDownloadMsg:
+		m.vaultDownloadMethod = msg.method
+		m.vaultDownloadErr = msg.err
+		// Auto-advance to config writing, then done.
+		return m.writeConfigAndFinish()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -417,8 +435,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // --- Auth flow helpers ---
 
-// startAuth transitions to the auth screen and begins the browser flow.
+// startAuth transitions to the auth screen, or skips it if already configured.
 func (m Model) startAuth() (tea.Model, tea.Cmd) {
+	// Check for existing valid API key — skip auth if found.
+	cfg, err := config.LoadConfig()
+	if err == nil && cfg.Auth.APIKey != "" && strings.HasPrefix(cfg.Auth.APIKey, "dck_") {
+		m.apiKey = cfg.Auth.APIKey
+		m.authMethod = auth.MethodExisting
+		m.authURL = cfg.Auth.AuthURL
+		if m.authURL == "" {
+			m.authURL = "https://auth.jules.solutions"
+		}
+		// Jump straight to audit.
+		m.state = stateAudit
+		return m, m.runAuditCmd()
+	}
+
+	// No existing key — run normal auth flow.
 	m.state = stateAuth
 	m.authState = authStateBrowser
 	return m, tea.Batch(tickCmd(), m.runBrowserFlowCmd())
@@ -514,8 +547,9 @@ func (m Model) runInstallCmd() tea.Cmd {
 	}
 }
 
-// finishSetup saves the final config from all collected answers and advances to Done.
+// finishSetup starts the vault download after setup questions are answered.
 func (m Model) finishSetup() (tea.Model, tea.Cmd) {
+	// Save config immediately (vault path + API key).
 	vaultPath := ""
 	if m.setupVaultInput != nil {
 		vaultPath = m.setupVaultInput.Value()
@@ -530,6 +564,31 @@ func (m Model) finishSetup() (tea.Model, tea.Cmd) {
 		m.err = fmt.Errorf("saving config: %w", err)
 		m.state = stateError
 		return m, nil
+	}
+
+	// Start vault download.
+	m.state = stateDownload
+	return m, m.runVaultDownloadCmd(vaultPath)
+}
+
+// runVaultDownloadCmd attempts to clone or scaffold the vault.
+func (m Model) runVaultDownloadCmd(vaultPath string) tea.Cmd {
+	return func() tea.Msg {
+		method, err := setup.DownloadVault(vaultPath)
+		return vaultDownloadMsg{method: method, err: err}
+	}
+}
+
+// writeConfigAndFinish writes .mcp.json and advances to Done.
+func (m Model) writeConfigAndFinish() (tea.Model, tea.Cmd) {
+	vaultPath := ""
+	if m.setupVaultInput != nil {
+		vaultPath = m.setupVaultInput.Value()
+	}
+
+	// Write .mcp.json if user opted in and vault path exists.
+	if m.setupConfigMCP && vaultPath != "" {
+		_ = setup.WriteMCPConfig(vaultPath) // best-effort, don't block on failure
 	}
 
 	m.state = stateDone
