@@ -146,6 +146,9 @@ type Model struct {
 	// Non-nil when the installer hits a fatal error.
 	err error
 
+	// jules-local install result.
+	installLocalErr error
+
 	// Claude Code launch state (Done screen).
 	launchAttempted bool
 	launchErr       error
@@ -713,6 +716,13 @@ func (m Model) writeConfigAndFinish() (tea.Model, tea.Cmd) {
 	// Write .mcp.json if user opted in and vault path exists.
 	if m.setupConfigMCP && vaultPath != "" {
 		_ = setup.WriteMCPConfig(vaultPath) // best-effort, don't block on failure
+	}
+
+	// Install jules-local (the platform runtime: CLI + MCP server).
+	// Without this, the .mcp.json config has nothing to call.
+	if err := setup.InstallJulesLocal(); err != nil {
+		// Non-fatal: user can install manually later. Log the error.
+		m.installLocalErr = err
 	}
 
 	m.state = stateDone

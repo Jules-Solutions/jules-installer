@@ -7,6 +7,7 @@ import (
 
 	"github.com/Jules-Solutions/jules-installer/internal/audit"
 	"github.com/Jules-Solutions/jules-installer/internal/config"
+	"github.com/Jules-Solutions/jules-installer/internal/setup"
 )
 
 // renderWelcome renders the welcome / splash screen.
@@ -322,6 +323,17 @@ func renderDone(m Model) string {
 
 	if m.setupConfigMCP {
 		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("MCP config written (.mcp.json)"))
+		sb.WriteString("\n")
+	}
+
+	// jules-local install status.
+	if m.installLocalErr != nil {
+		sb.WriteString("  " + warningStyle.Render("⚠") + " " + bodyStyle.Render("jules-local not installed: "+m.installLocalErr.Error()))
+		sb.WriteString("\n")
+		sb.WriteString("    " + mutedStyle.Render("Install manually: uv tool install git+https://github.com/Jules-Solutions/jules-local.git"))
+		sb.WriteString("\n")
+	} else if setup.JulesLocalVersion() != "" {
+		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("jules-local installed ("+setup.JulesLocalVersion()+")"))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
