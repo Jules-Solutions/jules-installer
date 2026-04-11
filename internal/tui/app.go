@@ -3,6 +3,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -81,6 +83,11 @@ type vaultDownloadMsg struct {
 	err    error
 }
 
+// launchDoneMsg is sent after the Claude Code launch attempt completes.
+type launchDoneMsg struct {
+	err error
+}
+
 // auditSubState tracks sub-state within the audit screen.
 type auditSubState int
 
@@ -138,10 +145,27 @@ type Model struct {
 
 	// Non-nil when the installer hits a fatal error.
 	err error
+
+	// Claude Code launch state (Done screen).
+	launchAttempted bool
+	launchErr       error
+
+	// resume flag: if true, skip completed steps on startup.
+	resume bool
 }
 
 // NewModel creates a fresh installer Model with the given auth URL and version string.
 func NewModel(authURL, version string) Model {
+	return newModel(authURL, version, false)
+}
+
+// NewModelWithResume creates a Model that will skip completed steps on Init.
+func NewModelWithResume(authURL, version string) Model {
+	return newModel(authURL, version, true)
+}
+
+// newModel is the shared constructor.
+func newModel(authURL, version string, resume bool) Model {
 	ti := textinput.New()
 	ti.Placeholder = "dck_..."
 	ti.CharLimit = 128
@@ -161,14 +185,74 @@ func NewModel(authURL, version string) Model {
 		textInput:       &ti,
 		setupVaultInput: &vi,
 		setupConfigMCP:  true, // default yes
+		resume:          resume,
 	}
 }
 
 // --- Bubbletea interface ---
 
 // Init is called once before the first Update. Starts the spinner tick.
+// When m.resume is true, scans existing config and skips completed steps.
 func (m Model) Init() tea.Cmd {
+	if m.resume {
+		return tea.Batch(tickCmd(), m.resumeCmd())
+	}
 	return tickCmd()
+}
+
+// resumeCmd checks existing state and returns a command that advances to the
+// first incomplete step.
+func (m Model) resumeCmd() tea.Cmd {
+	return func() tea.Msg {
+		return resumeDetectedMsg(detectResumeState())
+	}
+}
+
+// resumeState encodes which step to jump to when resuming.
+type resumeState int
+
+const (
+	resumeFromWelcome  resumeState = iota // nothing skipped
+	resumeFromAudit                       // auth done, skip to audit
+	resumeFromSetup                       // audit done, skip to setup
+	resumeFromDownload                    // setup done, skip to download
+	resumeFromDone                        // everything done, skip to done
+)
+
+// resumeDetectedMsg is sent on startup when --resume is active.
+type resumeDetectedMsg resumeState
+
+// detectResumeState reads config.toml and the vault to figure out how far
+// along the install is, returning the resumeState to jump to.
+func detectResumeState() resumeState {
+	cfg, err := config.LoadConfig()
+	if err != nil || cfg.Auth.APIKey == "" || !strings.HasPrefix(cfg.Auth.APIKey, "dck_") {
+		return resumeFromWelcome
+	}
+
+	// Auth is done. Check vault.
+	vaultPath := cfg.Local.VaultPath
+	if vaultPath == "" {
+		return resumeFromAudit
+	}
+
+	// Check whether vault has content.
+	info, err := os.Stat(vaultPath)
+	if err != nil || !info.IsDir() {
+		return resumeFromSetup
+	}
+	entries, _ := os.ReadDir(vaultPath)
+	if len(entries) == 0 {
+		return resumeFromSetup
+	}
+
+	// Vault exists — check for .mcp.json.
+	mcpPath := filepath.Join(vaultPath, ".mcp.json")
+	if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
+		return resumeFromDownload
+	}
+
+	return resumeFromDone
 }
 
 // Update handles all incoming messages and keyboard events.
@@ -183,6 +267,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.spinnerFrame++
 		return m, tickCmd()
+
+	case resumeDetectedMsg:
+		return m.applyResume(resumeState(msg))
 
 	case authDoneMsg:
 		if msg.err != nil {
@@ -220,6 +307,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vaultDownloadErr = msg.err
 		// Auto-advance to config writing, then done.
 		return m.writeConfigAndFinish()
+
+	case launchDoneMsg:
+		m.launchAttempted = true
+		m.launchErr = msg.err
+		// If launch succeeded, quit the installer (Claude Code is opening).
+		// If it failed, stay on Done screen so user can see the manual instructions.
+		if msg.err == nil {
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -423,7 +520,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-	case stateDone, stateError:
+	case stateDone:
+		switch msg.String() {
+		case "enter", " ":
+			// Attempt to launch Claude Code; quit if already tried (or if failed).
+			if m.launchAttempted {
+				return m, tea.Quit
+			}
+			return m, m.runLaunchCmd()
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
+
+	case stateError:
 		switch msg.String() {
 		case "q", "ctrl+c", "enter":
 			return m, tea.Quit
@@ -573,8 +682,23 @@ func (m Model) finishSetup() (tea.Model, tea.Cmd) {
 
 // runVaultDownloadCmd attempts to clone or scaffold the vault.
 func (m Model) runVaultDownloadCmd(vaultPath string) tea.Cmd {
+	params := setup.ScaffoldParams{
+		APIKey:  m.apiKey,
+		APIURL:  m.authURL,
+		MCPURL:  "https://mcp.jules.solutions",
+	}
+	// Derive username/vault name from the vault path.
+	params.VaultName = filepath.Base(vaultPath)
+	if len(params.VaultName) > 5 && params.VaultName[len(params.VaultName)-5:] == ".Life" {
+		params.UserName = params.VaultName[:len(params.VaultName)-5]
+	} else {
+		params.UserName = params.VaultName
+	}
+	// Use "https://api.jules.solutions" as the API URL (authURL is the auth service).
+	params.APIURL = "https://api.jules.solutions"
+
 	return func() tea.Msg {
-		method, err := setup.DownloadVault(vaultPath)
+		method, err := setup.DownloadVaultWithParams(vaultPath, params)
 		return vaultDownloadMsg{method: method, err: err}
 	}
 }
@@ -593,6 +717,67 @@ func (m Model) writeConfigAndFinish() (tea.Model, tea.Cmd) {
 
 	m.state = stateDone
 	return m, nil
+}
+
+// applyResume applies the detected resume state, loading config and jumping to the
+// appropriate step.
+func (m Model) applyResume(rs resumeState) (tea.Model, tea.Cmd) {
+	if rs == resumeFromWelcome {
+		// Nothing to skip — stay on welcome screen.
+		return m, nil
+	}
+
+	// Load config to populate model fields.
+	cfg, err := config.LoadConfig()
+	if err == nil && cfg.Auth.APIKey != "" {
+		m.apiKey = cfg.Auth.APIKey
+		m.authMethod = auth.MethodExisting
+		if cfg.Auth.AuthURL != "" {
+			m.authURL = cfg.Auth.AuthURL
+		}
+		if cfg.Local.VaultPath != "" && m.setupVaultInput != nil {
+			m.setupVaultInput.SetValue(cfg.Local.VaultPath)
+		}
+	}
+
+	switch rs {
+	case resumeFromAudit:
+		m.state = stateAudit
+		return m, m.runAuditCmd()
+
+	case resumeFromSetup:
+		m.state = stateAudit
+		m.auditSubState = auditShowResults
+		return m, m.runAuditCmd()
+
+	case resumeFromDownload:
+		vaultPath := ""
+		if m.setupVaultInput != nil {
+			vaultPath = m.setupVaultInput.Value()
+		}
+		m.state = stateDownload
+		return m, m.runVaultDownloadCmd(vaultPath)
+
+	case resumeFromDone:
+		// Mark vault as "existing" since it's already there.
+		m.vaultDownloadMethod = "existing"
+		m.state = stateDone
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// runLaunchCmd attempts to launch Claude Code in the vault directory.
+func (m Model) runLaunchCmd() tea.Cmd {
+	vaultPath := ""
+	if m.setupVaultInput != nil {
+		vaultPath = m.setupVaultInput.Value()
+	}
+	return func() tea.Msg {
+		err := setup.LaunchClaudeCode(vaultPath)
+		return launchDoneMsg{err: err}
+	}
 }
 
 // tickCmd returns a command that fires a tickMsg after a short interval,

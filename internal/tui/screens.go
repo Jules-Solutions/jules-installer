@@ -344,8 +344,32 @@ func renderDone(m Model) string {
 	}
 	sb.WriteString("\n\n")
 
-	sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" or ") +
-		highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
+	// Launch prompt — changes after launch attempt.
+	if m.launchAttempted {
+		if m.launchErr != nil {
+			// Launch failed — show manual instructions.
+			sb.WriteString("  " + warningStyle.Render("! Could not open terminal automatically."))
+			sb.WriteString("\n\n")
+			sb.WriteString("  " + subtitleStyle.Render("To start Claude Code manually:"))
+			sb.WriteString("\n")
+			if vaultPath != "" {
+				sb.WriteString("  " + codeStyle.Render("  cd "+vaultPath+"  "))
+				sb.WriteString("\n")
+				sb.WriteString("  " + codeStyle.Render("  claude  "))
+			} else {
+				sb.WriteString("  " + codeStyle.Render("  claude  "))
+			}
+			sb.WriteString("\n\n")
+			sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
+		} else {
+			sb.WriteString("  " + successStyle.Render("✓ Launching Claude Code…"))
+			sb.WriteString("\n")
+			sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
+		}
+	} else {
+		sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to launch Claude Code, or ") +
+			highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
+	}
 	sb.WriteString("\n")
 
 	return sb.String()
