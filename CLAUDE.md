@@ -16,15 +16,38 @@ goreleaser build --snapshot --clean              # cross-compile all platforms
 ## Architecture
 
 ```
-cmd/jules-setup/main.go  →  creates TUI app, runs tea.Program
+cmd/jules-setup/main.go  →  parses flags (--tier, --local-tools-mcp, --yes, --resume),
+                            dispatches to runner.Run (headless) or TUI (interactive)
 internal/tui/            →  Bubbletea model, styles, screens, components
+                            (welcome, tier pick, rerun menu, auth, audit, setup, download, config, done)
+internal/runner/         →  non-interactive install flow used by --yes. Same logical
+                            pipeline as the TUI, no user prompts.
 internal/auth/           →  3 auth methods (browser, device code, API key paste)
-internal/audit/          →  environment detection (git, docker, python, etc.)
-internal/setup/          →  interactive questions, vault download, config writing
-internal/config/         →  config types, paths, file I/O (~/.config/jules/config.toml)
-internal/update/         →  self-update checker (GitHub releases)
+internal/audit/          →  environment detection, tier-aware severity + install filters
+internal/setup/          →  interactive questions, vault download, tier-aware MCP writer
+                            (supports optional jules-local stdio bridge via MCPWriteOptions)
+internal/config/         →  config types (incl. Tier, MCPPath, MCPURL, LocalToolsMCP),
+                            file I/O (~/.config/jules/config.toml)
+internal/update/         →  self-update checker (GitHub releases, notify-only)
 pkg/version/             →  build-time version injection via ldflags
 ```
+
+## Tier Model (v0.3.0+)
+
+The installer forces a tier choice right after the welcome screen (or via `--tier 1|2` flag).
+
+- **Tier 1 (`config.TierFull`)** — local vault, jules-local CLI, `.mcp.json` in vault root
+- **Tier 2 (`config.TierRemote`)** — MCP-only, `.mcp.json` at `~/.claude/.mcp.json`
+
+Both tiers write the same `.mcp.json` shape: direct SSE URL + embedded `X-API-Key` header. The on-disk location is the only difference. File is mode 0600 (credential).
+
+Flow:
+```
+Welcome → Tier pick → Auth → Audit → [Tier 1: Setup questions → Vault download → MCP write → Install jules-local → Done]
+                                    → [Tier 2:                                   → MCP write                      → Done]
+```
+
+Re-run (no `--resume`, valid `config.toml` with tier present) shows a menu: Change tier / Re-run audit / Re-write MCP / Exit.
 
 ## Auth Flow
 
@@ -53,12 +76,16 @@ Stored at `~/.config/jules/config.toml`. On Linux, respects `XDG_CONFIG_HOME`.
 - Bubbles import: `github.com/charmbracelet/bubbles`
 - Brand colors in `internal/tui/styles.go`
 
-## Phase 2 TODOs
+## Status
 
-- Implement real audit checks (git, disk, docker, python, node)
+- **v0.2.0** (2026-04-10): auth flows, environment audit, TUI, vault download, MCP config, jules-local install, CC launch, --resume
+- **v0.3.0** (2026-04-24): Tier 1 vs Tier 2 split, tier-aware audit severity, re-run menu, --tier flag, unified direct-SSE MCP shape. Also includes:
+    - `--local-tools-mcp` flag + TUI screen + re-run menu toggle — opt-in Tier 1 jules-local stdio bridge (adds a second server entry in `.mcp.json`)
+    - `--yes` flag + `internal/runner` package — non-interactive headless flow for CI / scripted / upgrade use cases. Integration test suite at `cmd/jules-setup/integration_test.go` under `-tags integration`.
+
+## Deferred
+
 - Stream device code progress to TUI in real time
-- Vault download with git clone + progress reporting
-- Write ~/.config/jules/config.toml
-- Write .mcp.json into vault root for Claude Code
-- Self-update checker on startup
 - Homebrew tap + Scoop bucket for distribution
+- Auto-download + replace binary on self-update (currently only notifies)
+- Binary signing (Apple Developer + Windows Authenticode certs — Jules manual)

@@ -1,0 +1,45 @@
+name: Integration Tests
+
+# Runs on a nightly schedule + manual trigger + pre-release tag push.
+# Integration tests build the installer binary and invoke it as a
+# subprocess — slower than unit tests (~20s per platform), but catch
+# regressions in the end-to-end flow that unit tests miss.
+#
+# Per the INST-installer-tier-upgrade-test.md definition of done, these
+# are NOT run on every PR (too slow to gate merges on).
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC (low-traffic window for GitHub Actions).
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+  push:
+    # Also run before any release tag is pushed — an extra safety net.
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Run integration tests
+        # -tags integration enables the build-tagged test file at
+        # cmd/jules-setup/integration_test.go. Timeout generous because
+        # each test shells out to `go build`.
+        run: go test -tags integration -timeout 600s ./cmd/jules-setup/

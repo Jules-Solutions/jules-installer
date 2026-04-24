@@ -33,6 +33,83 @@ func (c Check) Installable() bool {
 	return ok
 }
 
+// Tier-aware severity.
+//
+// Tier 1 (full local install) treats Python/uv/Docker as critical — without
+// them, jules-local won't install and the full runtime won't work.
+//
+// Tier 2 (remote MCP only) only needs Claude Code to be functional; Python,
+// Docker, Node, Git, SSH, and editors are all nice-to-have. A missing tool
+// should be visible in the audit but NOT flagged as a hard fail, and we
+// shouldn't offer to auto-install it for a user who explicitly chose the
+// minimal path.
+
+// tier2Critical is the set of check names that a Tier 2 user genuinely needs.
+// Anything not in this set gets demoted from fail → warn for Tier 2 display.
+var tier2Critical = map[string]bool{
+	"Platform":    true, // metadata, always pass
+	"Claude Code": true, // THE consumer of the MCP config we're about to write
+	"Disk Space":  true, // sanity check — ~/.claude/.mcp.json still needs to be writable
+}
+
+// StatusForTier returns the effective status for display purposes, adjusted
+// for the onboarding tier. Pass Tier == "" to fall back to raw status.
+func (c Check) StatusForTier(tier string) string {
+	// Tier 1 or unset → raw status
+	if tier != "tier2" {
+		return c.Status
+	}
+	// Tier 2 — non-critical fails become warns.
+	if c.Status == StatusFail && !tier2Critical[c.Name] {
+		return StatusWarn
+	}
+	return c.Status
+}
+
+// InstallableForTier returns true only if the check is (a) installable AND
+// (b) matters for the given tier. Tier 2 users don't get offered a Python
+// install they don't need.
+func (c Check) InstallableForTier(tier string) bool {
+	if !c.Installable() {
+		return false
+	}
+	if tier == "tier2" && !tier2Critical[c.Name] {
+		return false
+	}
+	return true
+}
+
+// CountInstallableForTier counts checks that should be offered for auto-install
+// given the chosen tier.
+func CountInstallableForTier(checks []Check, tier string) int {
+	n := 0
+	for _, c := range checks {
+		if c.InstallableForTier(tier) {
+			n++
+		}
+	}
+	return n
+}
+
+// InstallMissingForTier runs installers only for checks that are tier-relevant.
+// For Tier 2 this is a narrow set (effectively just Claude Code).
+func InstallMissingForTier(checks []Check, tier string) []InstallResult {
+	var results []InstallResult
+	for _, c := range checks {
+		if !c.InstallableForTier(tier) {
+			continue
+		}
+		fn := installers[c.Name]
+		err := fn()
+		if err != nil {
+			results = append(results, InstallResult{Name: c.Name, Success: false, Detail: err.Error()})
+		} else {
+			results = append(results, InstallResult{Name: c.Name, Success: true, Detail: "installed"})
+		}
+	}
+	return results
+}
+
 // RunAudit runs all environment checks concurrently and returns their results
 // in a fixed display order.
 func RunAudit() []Check {

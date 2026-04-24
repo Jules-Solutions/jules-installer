@@ -3,17 +3,170 @@ package setup
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+
+	"github.com/Jules-Solutions/jules-installer/internal/config"
 )
 
-// WriteMCPConfig writes .mcp.json into the vault root so Claude Code
-// auto-connects to the jules-local MCP server.
+// MCPWriteOptions customises WriteMCPConfigForTier output.
+// Exists so future additions don't require breaking the function signature.
+type MCPWriteOptions struct {
+	// LocalToolsMCP, when true AND tier is TierFull, adds a second "jules-local"
+	// stdio server entry to .mcp.json. Exposes local-only tools (exec, file,
+	// terminal_spawn, git) to Claude Code alongside the remote SSE server.
+	// Ignored for Tier 2.
+	LocalToolsMCP bool
+}
+
+// WriteMCPConfigForTier writes the Claude Code MCP server config for the given tier.
 //
-// The API key is NOT stored here — jules-local reads it from
-// ~/.config/jules/config.toml at runtime.
+// Unified shape across tiers (per the 2026-04-24 tier-split design): both tiers
+// write a direct-SSE entry with the API key embedded as an X-API-Key header.
+// The only difference is the file location:
+//
+//   - Tier 1 (full install): vaultPath/.mcp.json — active in CC sessions
+//     launched from the vault root.
+//   - Tier 2 (remote only): ~/.claude/.mcp.json — active in every CC session
+//     on this machine regardless of cwd.
+//
+// When opts.LocalToolsMCP is true on Tier 1, a second "jules-local" stdio
+// server is registered so CC can call local-only tools (exec, file,
+// terminal_spawn, git) through the jules-local CLI.
+//
+// For Tier 1 the function also drops a minimal .claude/settings.json into the
+// vault if one is missing, matching v0.2.0 behaviour.
+//
+// mcpURL should be the SSE URL (e.g. "https://mcp.jules.solutions/sse"). Pass
+// an empty string to use the production default.
+//
+// The file is written with mode 0600 because it contains the API key.
+// Returns the absolute path of the written file.
+func WriteMCPConfigForTier(tier config.Tier, vaultPath, apiKey, mcpURL string, opts ...MCPWriteOptions) (string, error) {
+	if apiKey == "" {
+		return "", fmt.Errorf("api key is required to write MCP config")
+	}
+	if mcpURL == "" {
+		mcpURL = "https://mcp.jules.solutions/sse"
+	}
+
+	// Collapse variadic opts into a single value. First non-empty wins.
+	var opt MCPWriteOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
+	// Unified direct-SSE payload — both tiers use the same shape.
+	servers := map[string]interface{}{
+		"jules": map[string]interface{}{
+			"url": mcpURL,
+			"headers": map[string]string{
+				"X-API-Key": apiKey,
+			},
+		},
+	}
+
+	// Tier 1 + opt-in: also register the jules-local stdio bridge.
+	// Namespaced as "jules-local" so CC registers tools under
+	// mcp__jules-local__* — matches the platform convention.
+	if tier == config.TierFull && opt.LocalToolsMCP {
+		servers["jules-local"] = map[string]interface{}{
+			"command": "jules-local",
+			"args":    []string{"mcp", "--vault", "."},
+			"env": map[string]string{
+				"JULES_CONFIG": "~/.config/jules/config.toml",
+			},
+		}
+	}
+
+	// Per INST-installer-tier1-local-tools-toggle.md §Notes: if the user
+	// enabled local-tools MCP but jules-local isn't on PATH yet, write the
+	// config anyway (jules-local may get installed later by InstallJulesLocal
+	// or manually) but surface a warning so they know CC will spawn-and-fail
+	// on that server entry until the binary exists.
+	if tier == config.TierFull && opt.LocalToolsMCP {
+		if _, err := exec.LookPath("jules-local"); err != nil {
+			fmt.Fprintln(os.Stderr,
+				"warning: --local-tools-mcp is enabled but jules-local is not on PATH. "+
+					"The entry was still written — install jules-local (via the CLI install "+
+					"step, or manually via `uv tool install git+https://github.com/Jules-Solutions/jules-local.git`) "+
+					"or Claude Code will fail to spawn the stdio server.")
+		}
+	}
+
+	payload := map[string]interface{}{"mcpServers": servers}
+
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encoding MCP config: %w", err)
+	}
+	data = append(data, '\n')
+
+	// Tier-specific output path.
+	var mcpPath string
+	switch tier {
+	case config.TierFull:
+		if vaultPath == "" {
+			return "", fmt.Errorf("vault path is required for tier 1 MCP config")
+		}
+		mcpPath = filepath.Join(vaultPath, ".mcp.json")
+		// Ensure vault dir exists (offline scaffold creates this too, but be
+		// defensive for re-writes against a manually-moved vault).
+		if err := os.MkdirAll(vaultPath, 0o755); err != nil {
+			return "", fmt.Errorf("creating vault dir: %w", err)
+		}
+
+	case config.TierRemote:
+		p, err := config.DefaultTier2MCPPath()
+		if err != nil {
+			return "", err
+		}
+		mcpPath = p
+		// ~/.claude/ may not exist yet on a fresh machine.
+		if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+			return "", fmt.Errorf("creating ~/.claude dir: %w", err)
+		}
+
+	default:
+		return "", fmt.Errorf("unknown tier %q", tier)
+	}
+
+	// Write with 0600 — the file embeds a credential.
+	if err := os.WriteFile(mcpPath, data, 0o600); err != nil {
+		return "", fmt.Errorf("writing %s: %w", mcpPath, err)
+	}
+
+	// Tier 1 only: make sure the vault has a minimal .claude/settings.json.
+	if tier == config.TierFull {
+		settingsPath := filepath.Join(vaultPath, ".claude", "settings.json")
+		if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+			settings := map[string]interface{}{
+				"permissions": map[string]interface{}{
+					"allow": []string{},
+					"deny":  []string{},
+				},
+			}
+			sData, _ := json.MarshalIndent(settings, "", "  ")
+			sData = append(sData, '\n')
+			_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
+			_ = os.WriteFile(settingsPath, sData, 0o644)
+		}
+	}
+
+	return mcpPath, nil
+}
+
+// WriteMCPConfig is retained as a backward-compatible wrapper. New code should
+// use WriteMCPConfigForTier. Defaults to Tier 1 (vault-rooted .mcp.json) with
+// the v0.2.0 jules-local command-bridge shape preserved for legacy callers.
+//
+// Deprecated: prefer WriteMCPConfigForTier. This function preserves the old
+// command-bridge format for any legacy caller that relied on it, but no
+// in-tree caller invokes it after the 2026-04-24 tier-split refactor.
 func WriteMCPConfig(vaultPath string) error {
-	mcpConfig := map[string]interface{}{
+	legacy := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"jules": map[string]interface{}{
 				"command": "jules-local",
@@ -25,7 +178,7 @@ func WriteMCPConfig(vaultPath string) error {
 		},
 	}
 
-	data, err := json.MarshalIndent(mcpConfig, "", "  ")
+	data, err := json.MarshalIndent(legacy, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -36,7 +189,6 @@ func WriteMCPConfig(vaultPath string) error {
 		return err
 	}
 
-	// Also write a minimal .claude/settings.json if it doesn't exist.
 	settingsPath := filepath.Join(vaultPath, ".claude", "settings.json")
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
 		settings := map[string]interface{}{
@@ -47,7 +199,6 @@ func WriteMCPConfig(vaultPath string) error {
 		}
 		sData, _ := json.MarshalIndent(settings, "", "  ")
 		sData = append(sData, '\n')
-		// Ensure .claude/ dir exists.
 		_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
 		_ = os.WriteFile(settingsPath, sData, 0o644)
 	}
