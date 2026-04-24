@@ -226,6 +226,36 @@ func TestIntegration_Tier2ToTier1_Upgrade(t *testing.T) {
 	if post.Local.MCPPath != vaultMCP {
 		t.Errorf("config.local.mcp_path = %q, want %q", post.Local.MCPPath, vaultMCP)
 	}
+
+	// --- INST §Test flow additional assertions ---
+
+	// (a) CLAUDE.md scaffold marker — present when the offline scaffold ran.
+	// Git-clone path also produces a CLAUDE.md (it's in the vault template),
+	// so this assertion is valid either way.
+	claudeMD := filepath.Join(post.Local.VaultPath, "CLAUDE.md")
+	if _, err := os.Stat(claudeMD); err != nil {
+		t.Errorf("scaffold should create %s: %v", claudeMD, err)
+	}
+
+	// (b) .mcp.json file mode 0600 on Unix — holds an API key. Skipped on
+	// Windows because NTFS doesn't map cleanly to POSIX modes.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(vaultMCP)
+		if err == nil {
+			if mode := info.Mode().Perm(); mode != 0o600 {
+				t.Errorf(".mcp.json mode = %o, want 0600", mode)
+			}
+		}
+	}
+
+	// (c) No leftover Tier 2 ~/.claude/.mcp.json from the seeded state.
+	// (The seed config didn't actually write one — it only set mcp_path to
+	// a fake path — but we assert the Tier 1 flow didn't silently create
+	// one anyway.)
+	globalMCP := filepath.Join(home, ".claude", ".mcp.json")
+	if _, err := os.Stat(globalMCP); err == nil {
+		t.Errorf("Tier 1 upgrade should not write %s (that's the Tier 2 path)", globalMCP)
+	}
 }
 
 // TestIntegration_Tier1_WithLocalTools verifies the --local-tools-mcp flag

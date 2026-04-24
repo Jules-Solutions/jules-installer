@@ -1,0 +1,65 @@
+name: CI
+
+# Runs on every PR and every push to main. Unit tests only (fast, hermetic).
+# Integration tests live in integration.yml and run on a nightly schedule.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests + vet
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (unit)
+        # -short skips any test that does network work (runner upgrade test).
+        run: go test -short ./...
+
+  cross-compile:
+    name: Cross-compile matrix (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Build all targets
+        # Mirrors the GoReleaser matrix. Catches cross-platform build
+        # regressions before tag push.
+        run: |
+          set -euo pipefail
+          for combo in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64" "windows amd64" "windows arm64"; do
+            read -r OS ARCH <<< "$combo"
+            EXT=""
+            [ "$OS" = "windows" ] && EXT=".exe"
+            OUT="dist-ci/jules-setup_${OS}_${ARCH}${EXT}"
+            echo "--- Building $OS/$ARCH ---"
+            env CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" \
+              go build -ldflags="-s -w" -o "$OUT" ./cmd/jules-setup
+            ls -la "$OUT"
+          done

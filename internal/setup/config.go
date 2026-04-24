@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/Jules-Solutions/jules-installer/internal/config"
@@ -77,6 +78,21 @@ func WriteMCPConfigForTier(tier config.Tier, vaultPath, apiKey, mcpURL string, o
 			"env": map[string]string{
 				"JULES_CONFIG": "~/.config/jules/config.toml",
 			},
+		}
+	}
+
+	// Per INST-installer-tier1-local-tools-toggle.md §Notes: if the user
+	// enabled local-tools MCP but jules-local isn't on PATH yet, write the
+	// config anyway (jules-local may get installed later by InstallJulesLocal
+	// or manually) but surface a warning so they know CC will spawn-and-fail
+	// on that server entry until the binary exists.
+	if tier == config.TierFull && opt.LocalToolsMCP {
+		if _, err := exec.LookPath("jules-local"); err != nil {
+			fmt.Fprintln(os.Stderr,
+				"warning: --local-tools-mcp is enabled but jules-local is not on PATH. "+
+					"The entry was still written — install jules-local (via the CLI install "+
+					"step, or manually via `uv tool install git+https://github.com/Jules-Solutions/jules-local.git`) "+
+					"or Claude Code will fail to spawn the stdio server.")
 		}
 	}
 
