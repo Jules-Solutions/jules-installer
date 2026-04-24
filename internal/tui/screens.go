@@ -114,18 +114,40 @@ func renderRerun(m Model) string {
 	sb.WriteString("  " + subtitleStyle.Render("What would you like to do?"))
 	sb.WriteString("\n\n")
 
-	opts := []struct {
-		label string
-		desc  string
-	}{
-		{"Change tier", "Switch between Full install and Remote-only, re-run setup."},
-		{"Re-run audit", "Re-check the environment (git, docker, python, CC, etc.)."},
-		{"Re-write MCP config", "Regenerate .mcp.json at the recorded path. Use after an API key rotation."},
-		{"Exit", "Leave the current setup untouched."},
+	// Option list is tier-aware: the local-tools toggle only makes sense on Tier 1.
+	// Each entry pairs a display order with its canonical rerunChoice constant so
+	// the render code can highlight whichever action the cursor currently points at.
+	type rerunOpt struct {
+		label  string
+		desc   string
+		choice rerunChoice
 	}
+	opts := []rerunOpt{
+		{"Change tier", "Switch between Full install and Remote-only, re-run setup.", rerunChangeTier},
+		{"Re-run audit", "Re-check the environment (git, docker, python, CC, etc.).", rerunReAudit},
+		{"Re-write MCP config", "Regenerate .mcp.json at the recorded path. Use after an API key rotation.", rerunRewriteMCP},
+	}
+	if m.tier == config.TierFull {
+		// Show current state inline so the user knows what "toggle" will do.
+		cfg, _ := config.LoadConfig()
+		state := "OFF"
+		if cfg.Local.LocalToolsMCP {
+			state = "ON"
+		}
+		opts = append(opts, rerunOpt{
+			label:  "Toggle local-tools MCP",
+			desc:   fmt.Sprintf("Flip jules-local stdio server in .mcp.json. Currently: %s.", state),
+			choice: rerunToggleLocalMCP,
+		})
+	}
+	opts = append(opts, rerunOpt{
+		label:  "Exit",
+		desc:   "Leave the current setup untouched.",
+		choice: rerunExit,
+	})
 
 	for i, o := range opts {
-		if rerunChoice(i) == m.rerunCursor {
+		if o.choice == m.rerunCursor {
 			sb.WriteString("  " + highlightStyle.Render(fmt.Sprintf("> %d. %s", i+1, o.label)))
 			sb.WriteString("\n     " + bodyStyle.Render(o.desc) + "\n")
 		} else {
@@ -385,10 +407,28 @@ func renderSetup(m Model) string {
 	case setupConfirmMCP:
 		sb.WriteString("  " + subtitleStyle.Render("Configure Claude Code MCP connection?"))
 		sb.WriteString("\n\n")
-		sb.WriteString("  " + mutedStyle.Render("This will add jules.solutions as an MCP server when your vault is set up."))
-		sb.WriteString("\n  " + mutedStyle.Render("Your API key is read from config — no secrets in the MCP config file."))
+		sb.WriteString("  " + mutedStyle.Render("This adds jules.solutions as an MCP server — Claude Code can call"))
+		sb.WriteString("\n  " + mutedStyle.Render("tasks, projects, sessions, vault search, and all other platform tools."))
+		sb.WriteString("\n  " + mutedStyle.Render("The API key is embedded in .mcp.json (file mode 0600)."))
 		sb.WriteString("\n\n")
 		if m.setupConfigMCP {
+			sb.WriteString("  " + highlightStyle.Render("> Yes") + "    " + mutedStyle.Render("  No"))
+		} else {
+			sb.WriteString("  " + mutedStyle.Render("  Yes") + "    " + highlightStyle.Render("> No"))
+		}
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("← → to choose, ") + highlightStyle.Render("Enter") + mutedStyle.Render(" to confirm"))
+
+	case setupConfirmLocal:
+		sb.WriteString("  " + subtitleStyle.Render("Also expose jules-local's local-only tools?"))
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("Adds a second MCP server (stdio bridge to jules-local) so Claude Code can"))
+		sb.WriteString("\n  " + mutedStyle.Render("run exec, file, terminal_spawn, and git operations against your machine."))
+		sb.WriteString("\n\n")
+		sb.WriteString("  " + mutedStyle.Render("Default: No. Most users don't need this and remote SSE covers the common case."))
+		sb.WriteString("\n  " + mutedStyle.Render("Power users who want a CC → local-machine bridge should pick Yes."))
+		sb.WriteString("\n\n")
+		if m.setupLocalToolsMCP {
 			sb.WriteString("  " + highlightStyle.Render("> Yes") + "    " + mutedStyle.Render("  No"))
 		} else {
 			sb.WriteString("  " + mutedStyle.Render("  Yes") + "    " + highlightStyle.Render("> No"))

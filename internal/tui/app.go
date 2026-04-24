@@ -47,8 +47,9 @@ const (
 type setupState int
 
 const (
-	setupVaultPath  setupState = iota // user selects vault directory
-	setupConfirmMCP                   // confirm MCP configuration
+	setupVaultPath     setupState = iota // user selects vault directory
+	setupConfirmMCP                      // confirm MCP configuration
+	setupConfirmLocal                    // (Tier 1 only, when MCP confirmed) expose jules-local stdio MCP?
 )
 
 // tierChoice tracks which tier option is currently highlighted on the tier screen.
@@ -63,10 +64,11 @@ const (
 type rerunChoice int
 
 const (
-	rerunChangeTier rerunChoice = iota // switch tier and re-run setup
-	rerunReAudit                       // re-run environment audit only
-	rerunRewriteMCP                    // re-write .mcp.json with current config
-	rerunExit                          // exit without changes
+	rerunChangeTier      rerunChoice = iota // switch tier and re-run setup
+	rerunReAudit                            // re-run environment audit only
+	rerunRewriteMCP                         // re-write .mcp.json with current config
+	rerunToggleLocalMCP                     // flip local_tools_mcp and re-write .mcp.json (Tier 1 only)
+	rerunExit                               // exit without changes
 )
 
 // --- Messages ---
@@ -163,6 +165,13 @@ type Model struct {
 	setupVaultInput *textinput.Model
 	setupConfigMCP  bool
 
+	// setupLocalToolsMCP is the user's answer to "also register a jules-local
+	// stdio server?" on Tier 1. setupLocalToolsMCPFromFlag remembers whether
+	// the value came from --local-tools-mcp so we can skip the TUI screen for
+	// that prompt.
+	setupLocalToolsMCP         bool
+	setupLocalToolsMCPFromFlag bool
+
 	// Vault download result.
 	vaultDownloadMethod string // "git_clone", "scaffold", "existing", ""
 	vaultDownloadErr    error
@@ -204,6 +213,9 @@ type ModelOptions struct {
 	// Tier, when non-empty, bypasses the interactive tier picker. Accepts
 	// config.TierFull or config.TierRemote. Empty means "prompt the user."
 	Tier config.Tier
+	// LocalToolsMCP, when non-nil, bypasses the TUI prompt for the Tier 1
+	// local-tools-mcp opt-in. Nil means "TUI decides" (default is "No").
+	LocalToolsMCP *bool
 }
 
 // NewModel creates a fresh installer Model with the given auth URL and version string.
@@ -234,7 +246,7 @@ func NewModelWithOptions(opts ModelOptions) Model {
 	vi.CharLimit = 256
 	vi.Width = 60
 
-	return Model{
+	m := Model{
 		state:           stateWelcome,
 		authURL:         opts.AuthURL,
 		version:         opts.Version,
@@ -244,6 +256,11 @@ func NewModelWithOptions(opts ModelOptions) Model {
 		resume:          opts.Resume,
 		tier:            opts.Tier,
 	}
+	if opts.LocalToolsMCP != nil {
+		m.setupLocalToolsMCP = *opts.LocalToolsMCP
+		m.setupLocalToolsMCPFromFlag = true
+	}
+	return m
 }
 
 // --- Bubbletea interface ---
@@ -471,16 +488,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case stateRerun:
+		// Tier 2 hides rerunToggleLocalMCP (only Tier 1 writes a jules-local
+		// stdio bridge). Navigation has to hop over that slot on Tier 2.
 		switch msg.String() {
 		case "up", "k":
-			if m.rerunCursor > rerunChangeTier {
-				m.rerunCursor--
-			}
+			m.rerunCursor = prevRerunChoice(m.rerunCursor, m.tier)
 			return m, nil
 		case "down", "j":
-			if m.rerunCursor < rerunExit {
-				m.rerunCursor++
-			}
+			m.rerunCursor = nextRerunChoice(m.rerunCursor, m.tier)
 			return m, nil
 		case "1":
 			m.rerunCursor = rerunChangeTier
@@ -492,6 +507,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rerunCursor = rerunRewriteMCP
 			return m, nil
 		case "4":
+			// "4" means toggle on Tier 1 (where the action is present) or
+			// exit on Tier 2 (where it is hidden). Map to whichever slot
+			// the render layer put there.
+			if m.tier == config.TierFull {
+				m.rerunCursor = rerunToggleLocalMCP
+			} else {
+				m.rerunCursor = rerunExit
+			}
+			return m, nil
+		case "5":
 			m.rerunCursor = rerunExit
 			return m, nil
 		case "enter", " ":
@@ -641,7 +666,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.setupConfigMCP = false
 				return m, nil
 			case "enter":
-				// Save full config and advance to done.
+				// If MCP declined, skip the local-tools prompt entirely.
+				if !m.setupConfigMCP {
+					return m.finishSetup()
+				}
+				// If the user passed --local-tools-mcp on the command line,
+				// honour that and skip the interactive screen.
+				if m.setupLocalToolsMCPFromFlag {
+					return m.finishSetup()
+				}
+				// Otherwise advance to the local-tools prompt.
+				m.setupState = setupConfirmLocal
+				return m, nil
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+
+		case setupConfirmLocal:
+			switch msg.String() {
+			case "left", "right", "h", "l", "tab":
+				m.setupLocalToolsMCP = !m.setupLocalToolsMCP
+				return m, nil
+			case "y":
+				m.setupLocalToolsMCP = true
+				return m, nil
+			case "n":
+				m.setupLocalToolsMCP = false
+				return m, nil
+			case "enter":
 				return m.finishSetup()
 			case "ctrl+c":
 				return m, tea.Quit
@@ -740,6 +792,40 @@ func (m Model) confirmTier() (tea.Model, tea.Cmd) {
 	return m.startAuth()
 }
 
+// rerunOrder returns the ordered list of re-run menu entries for the given tier.
+// Encapsulated here so nav helpers and the render function agree on the layout.
+func rerunOrder(tier config.Tier) []rerunChoice {
+	if tier == config.TierFull {
+		return []rerunChoice{rerunChangeTier, rerunReAudit, rerunRewriteMCP, rerunToggleLocalMCP, rerunExit}
+	}
+	return []rerunChoice{rerunChangeTier, rerunReAudit, rerunRewriteMCP, rerunExit}
+}
+
+// nextRerunChoice returns the next choice after cur in the tier-appropriate
+// order, clamping at the end.
+func nextRerunChoice(cur rerunChoice, tier config.Tier) rerunChoice {
+	order := rerunOrder(tier)
+	for i, c := range order {
+		if c == cur && i+1 < len(order) {
+			return order[i+1]
+		}
+	}
+	// Unknown cursor or already at end — clamp to last.
+	return order[len(order)-1]
+}
+
+// prevRerunChoice returns the previous choice before cur, clamping at the start.
+func prevRerunChoice(cur rerunChoice, tier config.Tier) rerunChoice {
+	order := rerunOrder(tier)
+	for i, c := range order {
+		if c == cur && i > 0 {
+			return order[i-1]
+		}
+	}
+	// Unknown cursor or already at start — clamp to first.
+	return order[0]
+}
+
 // confirmRerun executes the selected re-run action.
 func (m Model) confirmRerun() (tea.Model, tea.Cmd) {
 	switch m.rerunCursor {
@@ -769,6 +855,42 @@ func (m Model) confirmRerun() (tea.Model, tea.Cmd) {
 			m.rerunMessageErr = false
 		}
 		// Stay on the re-run screen so the user sees the confirmation line.
+		return m, nil
+
+	case rerunToggleLocalMCP:
+		// Flip local_tools_mcp in config, re-write .mcp.json at recorded path.
+		// Tier 2 shouldn't be able to select this (render layer hides it); if
+		// somehow triggered, no-op with a message.
+		if m.tier != config.TierFull {
+			m.rerunMessage = "local-tools MCP toggle only applies to Tier 1 installs."
+			m.rerunMessageErr = true
+			return m, nil
+		}
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			m.rerunMessage = fmt.Sprintf("load config failed: %v", err)
+			m.rerunMessageErr = true
+			return m, nil
+		}
+		cfg.Local.LocalToolsMCP = !cfg.Local.LocalToolsMCP
+		if err := config.SaveConfig(cfg); err != nil {
+			m.rerunMessage = fmt.Sprintf("save config failed: %v", err)
+			m.rerunMessageErr = true
+			return m, nil
+		}
+		// Now re-write MCP using the flipped value (rewriteMCPFromConfig
+		// reads from config, so it'll pick up the new value).
+		if err := m.rewriteMCPFromConfig(); err != nil {
+			m.rerunMessage = fmt.Sprintf("MCP rewrite failed: %v", err)
+			m.rerunMessageErr = true
+		} else {
+			state := "enabled"
+			if !cfg.Local.LocalToolsMCP {
+				state = "disabled"
+			}
+			m.rerunMessage = fmt.Sprintf("local-tools MCP %s. .mcp.json rewritten.", state)
+			m.rerunMessageErr = false
+		}
 		return m, nil
 
 	case rerunExit:
@@ -953,10 +1075,13 @@ func (m Model) writeConfigAndFinish() (tea.Model, tea.Cmd) {
 	// Write .mcp.json (direct SSE, per Q5 decision: unified shape across tiers).
 	// Best-effort — don't block on failure.
 	if m.setupConfigMCP && vaultPath != "" {
-		mcpPath, err := setup.WriteMCPConfigForTier(config.TierFull, vaultPath, m.apiKey, defaultMCPURL(m))
+		mcpPath, err := setup.WriteMCPConfigForTier(
+			config.TierFull, vaultPath, m.apiKey, defaultMCPURL(m),
+			setup.MCPWriteOptions{LocalToolsMCP: m.setupLocalToolsMCP},
+		)
 		if err == nil {
 			m.mcpPathWritten = mcpPath
-			_ = persistMCPPath(mcpPath)
+			_ = persistMCPPathAndLocalTools(mcpPath, m.setupLocalToolsMCP)
 		}
 	}
 
@@ -1008,6 +1133,17 @@ func persistMCPPath(mcpPath string) error {
 	return config.SaveConfig(cfg)
 }
 
+// persistMCPPathAndLocalTools records both the written path AND the
+// local-tools-mcp preference in config.toml. Called after a successful
+// Tier 1 MCP write so the re-run menu's "Re-write MCP" action reproduces
+// the same content.
+func persistMCPPathAndLocalTools(mcpPath string, localToolsMCP bool) error {
+	cfg, _ := config.LoadConfig()
+	cfg.Local.MCPPath = mcpPath
+	cfg.Local.LocalToolsMCP = localToolsMCP
+	return config.SaveConfig(cfg)
+}
+
 // rewriteMCPFromConfig is called from the re-run menu. It regenerates the
 // .mcp.json file at the tier-appropriate location using current config values.
 func (m Model) rewriteMCPFromConfig() error {
@@ -1025,7 +1161,10 @@ func (m Model) rewriteMCPFromConfig() error {
 	if mcpURL == "" {
 		mcpURL = "https://mcp.jules.solutions/sse"
 	}
-	_, err = setup.WriteMCPConfigForTier(cfg.Local.Tier, cfg.Local.VaultPath, cfg.Auth.APIKey, mcpURL)
+	_, err = setup.WriteMCPConfigForTier(
+		cfg.Local.Tier, cfg.Local.VaultPath, cfg.Auth.APIKey, mcpURL,
+		setup.MCPWriteOptions{LocalToolsMCP: cfg.Local.LocalToolsMCP},
+	)
 	return err
 }
 

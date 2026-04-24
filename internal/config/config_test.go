@@ -129,4 +129,36 @@ func TestDefaultConfig_HasNoTier(t *testing.T) {
 	if cfg.Auth.MCPURL == "" {
 		t.Error("DefaultConfig.Auth.MCPURL must not be empty (needed by re-run menu)")
 	}
+	if cfg.Local.LocalToolsMCP {
+		t.Error("DefaultConfig must have LocalToolsMCP=false (opt-in)")
+	}
+}
+
+// TestLocalToolsMCP_RoundTrip is a narrow regression test for the Tier 1
+// opt-in flag: if TOML serialisation drops local_tools_mcp, the re-run menu's
+// toggle action silently does nothing.
+func TestLocalToolsMCP_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", dir)
+	} else {
+		t.Setenv("HOME", dir)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Auth.APIKey = "dck_x"
+	cfg.Local.Tier = TierFull
+	cfg.Local.LocalToolsMCP = true
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	reloaded, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !reloaded.Local.LocalToolsMCP {
+		t.Error("local_tools_mcp did not survive TOML round-trip")
+	}
 }

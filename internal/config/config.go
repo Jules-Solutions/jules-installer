@@ -56,6 +56,12 @@ type LocalConfig struct {
 	// MCPPath records where the installer wrote .mcp.json for re-run detection.
 	// Tier 1: vault root. Tier 2: ~/.claude/.mcp.json (user-global).
 	MCPPath string `toml:"mcp_path"`
+	// LocalToolsMCP, when true on Tier 1, adds a second "jules-local" MCP server
+	// (stdio bridge to the installed jules-local CLI) to .mcp.json alongside the
+	// remote "jules" SSE entry. Exposes local-only tools — exec_manage,
+	// file_manage, terminal_spawn, git_manage — to Claude Code. Default false
+	// matches the v0.3.0 ship behaviour. Tier 2 ignores this field.
+	LocalToolsMCP bool `toml:"local_tools_mcp"`
 }
 
 // ConfigDir returns the path to the jules config directory.

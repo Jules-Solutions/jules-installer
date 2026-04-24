@@ -10,6 +10,16 @@ import (
 	"github.com/Jules-Solutions/jules-installer/internal/config"
 )
 
+// MCPWriteOptions customises WriteMCPConfigForTier output.
+// Exists so future additions don't require breaking the function signature.
+type MCPWriteOptions struct {
+	// LocalToolsMCP, when true AND tier is TierFull, adds a second "jules-local"
+	// stdio server entry to .mcp.json. Exposes local-only tools (exec, file,
+	// terminal_spawn, git) to Claude Code alongside the remote SSE server.
+	// Ignored for Tier 2.
+	LocalToolsMCP bool
+}
+
 // WriteMCPConfigForTier writes the Claude Code MCP server config for the given tier.
 //
 // Unified shape across tiers (per the 2026-04-24 tier-split design): both tiers
@@ -21,6 +31,10 @@ import (
 //   - Tier 2 (remote only): ~/.claude/.mcp.json — active in every CC session
 //     on this machine regardless of cwd.
 //
+// When opts.LocalToolsMCP is true on Tier 1, a second "jules-local" stdio
+// server is registered so CC can call local-only tools (exec, file,
+// terminal_spawn, git) through the jules-local CLI.
+//
 // For Tier 1 the function also drops a minimal .claude/settings.json into the
 // vault if one is missing, matching v0.2.0 behaviour.
 //
@@ -29,7 +43,7 @@ import (
 //
 // The file is written with mode 0600 because it contains the API key.
 // Returns the absolute path of the written file.
-func WriteMCPConfigForTier(tier config.Tier, vaultPath, apiKey, mcpURL string) (string, error) {
+func WriteMCPConfigForTier(tier config.Tier, vaultPath, apiKey, mcpURL string, opts ...MCPWriteOptions) (string, error) {
 	if apiKey == "" {
 		return "", fmt.Errorf("api key is required to write MCP config")
 	}
@@ -37,17 +51,36 @@ func WriteMCPConfigForTier(tier config.Tier, vaultPath, apiKey, mcpURL string) (
 		mcpURL = "https://mcp.jules.solutions/sse"
 	}
 
+	// Collapse variadic opts into a single value. First non-empty wins.
+	var opt MCPWriteOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	// Unified direct-SSE payload — both tiers use the same shape.
-	payload := map[string]interface{}{
-		"mcpServers": map[string]interface{}{
-			"jules": map[string]interface{}{
-				"url": mcpURL,
-				"headers": map[string]string{
-					"X-API-Key": apiKey,
-				},
+	servers := map[string]interface{}{
+		"jules": map[string]interface{}{
+			"url": mcpURL,
+			"headers": map[string]string{
+				"X-API-Key": apiKey,
 			},
 		},
 	}
+
+	// Tier 1 + opt-in: also register the jules-local stdio bridge.
+	// Namespaced as "jules-local" so CC registers tools under
+	// mcp__jules-local__* — matches the platform convention.
+	if tier == config.TierFull && opt.LocalToolsMCP {
+		servers["jules-local"] = map[string]interface{}{
+			"command": "jules-local",
+			"args":    []string{"mcp", "--vault", "."},
+			"env": map[string]string{
+				"JULES_CONFIG": "~/.config/jules/config.toml",
+			},
+		}
+	}
+
+	payload := map[string]interface{}{"mcpServers": servers}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

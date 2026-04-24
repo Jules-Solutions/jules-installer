@@ -16,13 +16,19 @@ goreleaser build --snapshot --clean              # cross-compile all platforms
 ## Architecture
 
 ```
-cmd/jules-setup/main.go  →  creates TUI app, parses --tier / --resume, runs tea.Program
-internal/tui/            →  Bubbletea model, styles, screens, components (tier + rerun screens)
+cmd/jules-setup/main.go  →  parses flags (--tier, --local-tools-mcp, --yes, --resume),
+                            dispatches to runner.Run (headless) or TUI (interactive)
+internal/tui/            →  Bubbletea model, styles, screens, components
+                            (welcome, tier pick, rerun menu, auth, audit, setup, download, config, done)
+internal/runner/         →  non-interactive install flow used by --yes. Same logical
+                            pipeline as the TUI, no user prompts.
 internal/auth/           →  3 auth methods (browser, device code, API key paste)
 internal/audit/          →  environment detection, tier-aware severity + install filters
 internal/setup/          →  interactive questions, vault download, tier-aware MCP writer
-internal/config/         →  config types (incl. Tier, MCPPath, MCPURL), file I/O (~/.config/jules/config.toml)
-internal/update/         →  self-update checker (GitHub releases)
+                            (supports optional jules-local stdio bridge via MCPWriteOptions)
+internal/config/         →  config types (incl. Tier, MCPPath, MCPURL, LocalToolsMCP),
+                            file I/O (~/.config/jules/config.toml)
+internal/update/         →  self-update checker (GitHub releases, notify-only)
 pkg/version/             →  build-time version injection via ldflags
 ```
 
@@ -73,7 +79,9 @@ Stored at `~/.config/jules/config.toml`. On Linux, respects `XDG_CONFIG_HOME`.
 ## Status
 
 - **v0.2.0** (2026-04-10): auth flows, environment audit, TUI, vault download, MCP config, jules-local install, CC launch, --resume
-- **v0.3.0** (2026-04-24): Tier 1 vs Tier 2 split, tier-aware audit severity, re-run menu, --tier flag, unified direct-SSE MCP shape
+- **v0.3.0** (2026-04-24): Tier 1 vs Tier 2 split, tier-aware audit severity, re-run menu, --tier flag, unified direct-SSE MCP shape. Also includes:
+    - `--local-tools-mcp` flag + TUI screen + re-run menu toggle — opt-in Tier 1 jules-local stdio bridge (adds a second server entry in `.mcp.json`)
+    - `--yes` flag + `internal/runner` package — non-interactive headless flow for CI / scripted / upgrade use cases. Integration test suite at `cmd/jules-setup/integration_test.go` under `-tags integration`.
 
 ## Deferred
 
