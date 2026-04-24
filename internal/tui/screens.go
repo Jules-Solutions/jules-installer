@@ -10,6 +10,146 @@ import (
 	"github.com/Jules-Solutions/jules-installer/internal/setup"
 )
 
+// renderTier renders the Tier 1 vs Tier 2 picker screen shown right after Welcome.
+func renderTier(m Model) string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("  Choose Your Install"))
+	sb.WriteString("\n")
+	if m.width > 4 {
+		sb.WriteString(HRule(m.width - 4))
+	}
+	sb.WriteString("\n\n")
+
+	sb.WriteString("  " + subtitleStyle.Render("How much of Jules.Solutions do you want locally?"))
+	sb.WriteString("\n\n")
+
+	// --- Tier 1 option ---
+	tier1Label := "Full install"
+	tier1Desc := []string{
+		"Local vault (~/Your.Life) with Claude Code + jules-local CLI.",
+		"Best for daily drivers — full vault, playgrounds, ops tools.",
+		"Requires: Git, Python, uv. The audit can install what's missing.",
+	}
+	if m.tierCursor == tierChoiceFull {
+		sb.WriteString("  " + highlightStyle.Render("> 1. "+tier1Label))
+		sb.WriteString("\n")
+		for _, line := range tier1Desc {
+			sb.WriteString("     " + bodyStyle.Render(line) + "\n")
+		}
+	} else {
+		sb.WriteString("    " + bodyStyle.Render("1. "+tier1Label))
+		sb.WriteString("\n")
+		for _, line := range tier1Desc {
+			sb.WriteString("     " + mutedStyle.Render(line) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+
+	// --- Tier 2 option ---
+	tier2Label := "Remote only (MCP)"
+	tier2Desc := []string{
+		"Just wire Claude Code up to jules.solutions over MCP. No vault, no jules-local.",
+		"Best for: trying it out, headless servers, users who don't want a local install.",
+		"Writes ~/.claude/.mcp.json — Claude Code picks it up on next restart.",
+	}
+	if m.tierCursor == tierChoiceRemote {
+		sb.WriteString("  " + highlightStyle.Render("> 2. "+tier2Label))
+		sb.WriteString("\n")
+		for _, line := range tier2Desc {
+			sb.WriteString("     " + bodyStyle.Render(line) + "\n")
+		}
+	} else {
+		sb.WriteString("    " + bodyStyle.Render("2. "+tier2Label))
+		sb.WriteString("\n")
+		for _, line := range tier2Desc {
+			sb.WriteString("     " + mutedStyle.Render(line) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("  " + mutedStyle.Render("↑/↓ or 1/2 to choose, ") +
+		highlightStyle.Render("Enter") + mutedStyle.Render(" to confirm, ") +
+		highlightStyle.Render("q") + mutedStyle.Render(" to quit."))
+	sb.WriteString("\n")
+	sb.WriteString("  " + mutedStyle.Render("(You can run ") +
+		codeStyle.Render("jules-setup --tier 1") +
+		mutedStyle.Render(" later to upgrade from Remote to Full.)"))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+// renderRerun renders the re-run action menu shown when a valid config already exists.
+func renderRerun(m Model) string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(titleStyle.Render("  Setup Already Configured"))
+	sb.WriteString("\n")
+	if m.width > 4 {
+		sb.WriteString(HRule(m.width - 4))
+	}
+	sb.WriteString("\n\n")
+
+	// Show current configured state so user knows what they have.
+	tierLabel := "Tier 1 (Full install)"
+	if m.tier == config.TierRemote {
+		tierLabel = "Tier 2 (Remote MCP only)"
+	}
+	sb.WriteString("  " + KeyValueRow("Tier", tierLabel))
+	sb.WriteString("\n")
+	sb.WriteString("  " + KeyValueRow("API Key", truncateKey(m.apiKey)))
+	sb.WriteString("\n")
+	if cfg, err := config.LoadConfig(); err == nil {
+		if cfg.Local.VaultPath != "" {
+			sb.WriteString("  " + KeyValueRow("Vault", cfg.Local.VaultPath))
+			sb.WriteString("\n")
+		}
+		if cfg.Local.MCPPath != "" {
+			sb.WriteString("  " + KeyValueRow("MCP Config", cfg.Local.MCPPath))
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString("  " + subtitleStyle.Render("What would you like to do?"))
+	sb.WriteString("\n\n")
+
+	opts := []struct {
+		label string
+		desc  string
+	}{
+		{"Change tier", "Switch between Full install and Remote-only, re-run setup."},
+		{"Re-run audit", "Re-check the environment (git, docker, python, CC, etc.)."},
+		{"Re-write MCP config", "Regenerate .mcp.json at the recorded path. Use after an API key rotation."},
+		{"Exit", "Leave the current setup untouched."},
+	}
+
+	for i, o := range opts {
+		if rerunChoice(i) == m.rerunCursor {
+			sb.WriteString("  " + highlightStyle.Render(fmt.Sprintf("> %d. %s", i+1, o.label)))
+			sb.WriteString("\n     " + bodyStyle.Render(o.desc) + "\n")
+		} else {
+			sb.WriteString("    " + bodyStyle.Render(fmt.Sprintf("%d. %s", i+1, o.label)))
+			sb.WriteString("\n     " + mutedStyle.Render(o.desc) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+
+	if m.rerunMessage != "" {
+		if m.rerunMessageErr {
+			sb.WriteString("  " + errorStyle.Render(m.rerunMessage) + "\n\n")
+		} else {
+			sb.WriteString("  " + successStyle.Render(m.rerunMessage) + "\n\n")
+		}
+	}
+
+	sb.WriteString("  " + mutedStyle.Render("↑/↓ or 1-4 to choose, ") +
+		highlightStyle.Render("Enter") + mutedStyle.Render(" to confirm."))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
 // renderWelcome renders the welcome / splash screen.
 func renderWelcome(m Model) string {
 	var sb strings.Builder
@@ -128,7 +268,9 @@ func renderAudit(m Model) string {
 		return sb.String()
 	}
 
-	// Show check results.
+	// Show check results. For Tier 2 users, Python/Docker/Node fails are
+	// demoted to warnings — they don't block a remote-only install.
+	tierStr := string(m.tier)
 	for _, c := range m.auditResults {
 		detail := c.Version
 		if c.Detail != "" {
@@ -138,13 +280,24 @@ func renderAudit(m Model) string {
 				detail = c.Detail
 			}
 		}
-		sb.WriteString("  " + StatusLine(c.Status, fmt.Sprintf("%-14s", c.Name), detail) + "\n")
+		displayStatus := c.StatusForTier(tierStr)
+		// Append a small hint when a fail was demoted, so the user knows
+		// why a missing tool is showing as a warning.
+		if m.tier == config.TierRemote && c.Status == audit.StatusFail && displayStatus == audit.StatusWarn {
+			if detail == "" {
+				detail = "not needed for Tier 2"
+			} else {
+				detail = detail + " — not needed for Tier 2"
+			}
+		}
+		sb.WriteString("  " + StatusLine(displayStatus, fmt.Sprintf("%-14s", c.Name), detail) + "\n")
 	}
 
-	// Summary line.
+	// Summary line — counts reflect the tier-adjusted statuses, so a Tier 2
+	// user doesn't see "3 failed" on items they explicitly opted out of.
 	pass, fail, warn := 0, 0, 0
 	for _, c := range m.auditResults {
-		switch c.Status {
+		switch c.StatusForTier(tierStr) {
 		case audit.StatusPass:
 			pass++
 		case audit.StatusFail:
@@ -181,7 +334,15 @@ func renderAudit(m Model) string {
 	// State-dependent prompt.
 	switch m.auditSubState {
 	case auditOfferInstall:
-		installable := audit.CountInstallable(m.auditResults)
+		// Tier 2 users only get offered tools they actually need (CC etc.),
+		// never Python/Docker/Node.
+		installable := audit.CountInstallableForTier(m.auditResults, tierStr)
+		if installable == 0 {
+			// Nothing tier-relevant to install. Skip the offer entirely.
+			sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") +
+				mutedStyle.Render(" to continue…"))
+			break
+		}
 		sb.WriteString("  " + highlightStyle.Render(fmt.Sprintf("%d tools can be auto-installed.", installable)))
 		sb.WriteString("\n")
 		sb.WriteString("  " + bodyStyle.Render("Install them now? ") +
@@ -282,14 +443,22 @@ func renderConfig(m Model) string {
 		SpinnerWithMessage(0, "Writing config files…") + "\n"
 }
 
-// renderDone renders the completion screen with an honest summary.
+// renderDone renders the completion screen with an honest, tier-aware summary.
 func renderDone(m Model) string {
 	var sb strings.Builder
 	sb.WriteString("\n")
 	sb.WriteString(successStyle.Render("  ✓ Setup Complete"))
 	sb.WriteString("\n\n")
 
-	// What was done.
+	// Tier indicator — makes it crystal clear to the user which path ran.
+	tierLabel := "Full install (Tier 1)"
+	if m.tier == config.TierRemote {
+		tierLabel = "Remote MCP only (Tier 2)"
+	}
+	sb.WriteString("  " + KeyValueRow("Tier", tierLabel))
+	sb.WriteString("\n\n")
+
+	// Auth + config saved.
 	sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Authenticated via ") + highlightStyle.Render(string(m.authMethod)))
 	sb.WriteString("\n")
 
@@ -297,10 +466,12 @@ func renderDone(m Model) string {
 	sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("API key saved to ") + mutedStyle.Render(configPath))
 	sb.WriteString("\n")
 
+	// Audit summary — use tier-aware counts so Tier 2 doesn't look like a failure.
 	if len(m.auditResults) > 0 {
+		tierStr := string(m.tier)
 		pass := 0
 		for _, c := range m.auditResults {
-			if c.Status == audit.StatusPass {
+			if c.StatusForTier(tierStr) == audit.StatusPass {
 				pass++
 			}
 		}
@@ -308,44 +479,59 @@ func renderDone(m Model) string {
 		sb.WriteString("\n")
 	}
 
-	// Vault status.
-	switch m.vaultDownloadMethod {
-	case "existing":
-		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault already set up"))
-	case "git_clone":
-		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault cloned from GitHub"))
-	case "scaffold":
-		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Fresh vault scaffolded"))
-	default:
-		sb.WriteString("  " + mutedStyle.Render("⟳") + " " + bodyStyle.Render("Vault not yet downloaded"))
+	// Tier-specific artifacts.
+	if m.tier == config.TierRemote {
+		// Tier 2: just the MCP config write.
+		if m.mcpPathWritten != "" {
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("MCP config written (") + mutedStyle.Render(m.mcpPathWritten) + bodyStyle.Render(")"))
+			sb.WriteString("\n")
+		}
+	} else {
+		// Tier 1: vault + MCP + jules-local.
+		switch m.vaultDownloadMethod {
+		case "existing":
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault already set up"))
+		case "git_clone":
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Vault cloned from GitHub"))
+		case "scaffold":
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("Fresh vault scaffolded (offline fallback)"))
+		default:
+			sb.WriteString("  " + mutedStyle.Render("⟳") + " " + bodyStyle.Render("Vault not yet downloaded"))
+		}
+		sb.WriteString("\n")
+
+		if m.setupConfigMCP && m.mcpPathWritten != "" {
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("MCP config written (") + mutedStyle.Render(m.mcpPathWritten) + bodyStyle.Render(")"))
+			sb.WriteString("\n")
+		}
+
+		// jules-local install status (Tier 1 only).
+		if m.installLocalErr != nil {
+			sb.WriteString("  " + warningStyle.Render("⚠") + " " + bodyStyle.Render("jules-local not installed: "+m.installLocalErr.Error()))
+			sb.WriteString("\n")
+			sb.WriteString("    " + mutedStyle.Render("Install manually: uv tool install git+https://github.com/Jules-Solutions/jules-local.git"))
+			sb.WriteString("\n")
+		} else if setup.JulesLocalVersion() != "" {
+			sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("jules-local installed ("+setup.JulesLocalVersion()+")"))
+			sb.WriteString("\n")
+		}
 	}
 	sb.WriteString("\n")
 
-	if m.setupConfigMCP {
-		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("MCP config written (.mcp.json)"))
-		sb.WriteString("\n")
-	}
-
-	// jules-local install status.
-	if m.installLocalErr != nil {
-		sb.WriteString("  " + warningStyle.Render("⚠") + " " + bodyStyle.Render("jules-local not installed: "+m.installLocalErr.Error()))
-		sb.WriteString("\n")
-		sb.WriteString("    " + mutedStyle.Render("Install manually: uv tool install git+https://github.com/Jules-Solutions/jules-local.git"))
-		sb.WriteString("\n")
-	} else if setup.JulesLocalVersion() != "" {
-		sb.WriteString("  " + successStyle.Render("✓") + " " + bodyStyle.Render("jules-local installed ("+setup.JulesLocalVersion()+")"))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
-
-	// Next steps.
+	// Next steps — tier-specific.
 	vaultPath := ""
 	if m.setupVaultInput != nil {
 		vaultPath = m.setupVaultInput.Value()
 	}
 	sb.WriteString(subtitleStyle.Render("  Next steps:"))
 	sb.WriteString("\n")
-	if vaultPath != "" {
+	if m.tier == config.TierRemote {
+		sb.WriteString("  " + bodyStyle.Render("  1. Restart Claude Code (it re-reads ~/.claude/.mcp.json on launch)"))
+		sb.WriteString("\n")
+		sb.WriteString("  " + bodyStyle.Render("  2. In any CC session, try: ") + codeStyle.Render(" /mcp ") + bodyStyle.Render(" to confirm jules.solutions is connected"))
+		sb.WriteString("\n")
+		sb.WriteString("  " + mutedStyle.Render("  Later, upgrade to full install with: ") + codeStyle.Render(" jules-setup --tier 1 "))
+	} else if vaultPath != "" {
 		sb.WriteString("  " + bodyStyle.Render("  1. cd "+vaultPath))
 		sb.WriteString("\n")
 		sb.WriteString("  " + bodyStyle.Render("  2. claude  (start Claude Code in your vault)"))
@@ -356,7 +542,15 @@ func renderDone(m Model) string {
 	}
 	sb.WriteString("\n\n")
 
-	// Launch prompt — changes after launch attempt.
+	// Launch prompt — Tier 2 has no vault to launch CC in, so the prompt is different.
+	if m.tier == config.TierRemote {
+		sb.WriteString("  " + mutedStyle.Render("Press ") + highlightStyle.Render("Enter") + mutedStyle.Render(" or ") +
+			highlightStyle.Render("q") + mutedStyle.Render(" to exit."))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// Tier 1: offer to launch CC in the vault directory.
 	if m.launchAttempted {
 		if m.launchErr != nil {
 			// Launch failed — show manual instructions.

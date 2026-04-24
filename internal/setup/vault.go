@@ -47,7 +47,8 @@ func DownloadVaultWithParams(vaultPath string, params ScaffoldParams) (string, e
 		params.APIURL = "https://api.jules.solutions"
 	}
 	if params.MCPURL == "" {
-		params.MCPURL = "https://mcp.jules.solutions"
+		// Include the /sse suffix — Claude Code's SSE transport needs the full path.
+		params.MCPURL = "https://mcp.jules.solutions/sse"
 	}
 
 	// Strategy 0: vault directory already exists (re-run case).
@@ -368,21 +369,27 @@ Setup complete. Vault scaffolded offline (no git clone available at install time
 	}
 
 	// Write .mcp.json — MCP server config.
+	//
+	// Unified direct-SSE shape across tiers (2026-04-24 tier-split decision).
+	// Claude Code opens an SSE connection to the remote MCP endpoint using the
+	// embedded X-API-Key header. No jules-local process needed.
+	//
+	// The file is later overwritten by WriteMCPConfigForTier with the same
+	// format but authoritative values — this scaffold write exists so a vault
+	// cloned/scaffolded without running WriteMCPConfigForTier (e.g. re-run
+	// after manual vault move) still has a usable MCP config.
 	mcpJSON := substituteParams(`{
   "mcpServers": {
     "jules": {
-      "command": "jules-local",
-      "args": ["mcp", "--vault", "."],
-      "env": {
-        "JULES_CONFIG": "~/.config/jules/config.toml",
-        "JULES_API_URL": "{{api_url}}",
-        "JULES_MCP_URL": "{{mcp_url}}"
+      "url": "{{mcp_url}}",
+      "headers": {
+        "X-API-Key": "{{api_key}}"
       }
     }
   }
 }
 `, p)
-	if err := os.WriteFile(filepath.Join(vaultPath, ".mcp.json"), []byte(mcpJSON), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(vaultPath, ".mcp.json"), []byte(mcpJSON), 0o600); err != nil {
 		return err
 	}
 
