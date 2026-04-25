@@ -2,3 +2,6 @@ bin/
 dist/
 *.exe
 .DS_Store
+
+# Runtime caches created by the installer integration tests
+cmd/jules-setup/pip/cache/
