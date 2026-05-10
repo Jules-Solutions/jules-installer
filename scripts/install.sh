@@ -43,11 +43,16 @@ else
 fi
 
 # Extract download URL for our platform.
-URL=$(echo "$RELEASE" | grep -o "\"browser_download_url\"[^\"]*${PATTERN}[^\"]*" | head -1 | cut -d'"' -f4)
+# Match the GitHub release asset URL directly. The previous regex anchored on
+# "browser_download_url" but `[^"]*` cannot span JSON quote boundaries into the
+# URL value, so the PATTERN match never occurred against multi-platform releases.
+# Match the URL itself, which carries PATTERN inside its path.
+URL=$(echo "$RELEASE" | grep -oE 'https://github\.com/[^"]*'"$PATTERN"'[^"]*' | head -1)
 
 if [ -z "$URL" ]; then
-    # Try direct binary name (for single-platform releases like v0.1.0).
-    URL=$(echo "$RELEASE" | grep -o '"browser_download_url"[^"]*jules-setup[^"]*' | head -1 | cut -d'"' -f4)
+    # Fallback: any github.com release asset whose URL contains "jules-setup"
+    # (covers single-platform releases like v0.1.0 that shipped a bare binary).
+    URL=$(echo "$RELEASE" | grep -oE 'https://github\.com/[^"]*jules-setup[^"]*' | head -1)
 fi
 
 if [ -z "$URL" ]; then
