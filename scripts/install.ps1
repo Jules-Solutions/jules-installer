@@ -29,16 +29,25 @@ try {
     }
 
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers $headers
-    $asset = $release.assets | Where-Object { $_.name -eq "jules-setup.exe" }
+
+    # Detect architecture (default amd64; arm64 if running natively on ARM64).
+    # GoReleaser ships per-arch assets named jules-setup_{version}_windows_{arch}.zip.
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+    $assetPattern = "jules-setup_*_windows_${arch}.zip"
+
+    $asset = $release.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
 
     if (-not $asset) {
-        Write-Host "Error: No jules-setup.exe found in latest release." -ForegroundColor Red
+        Write-Host "Error: No binary found for windows/$arch in latest release." -ForegroundColor Red
+        Write-Host "Expected asset matching: $assetPattern" -ForegroundColor DarkGray
         exit 1
     }
 
     Write-Host "Version: $($release.tag_name)" -ForegroundColor DarkGray
+    Write-Host "Platform: windows/$arch" -ForegroundColor DarkGray
 
-    # Download the binary.
+    # Download the binary archive.
+    $zipPath = Join-Path $tempDir "jules-setup.zip"
     $downloadHeaders = @{}
     if ($token) {
         $downloadHeaders["Authorization"] = "Bearer $token"
@@ -48,12 +57,24 @@ try {
         $downloadUrl = $asset.browser_download_url
     }
 
-    Invoke-WebRequest -Uri $downloadUrl -OutFile $exePath -Headers $downloadHeaders
-    Write-Host "Downloaded to: $exePath" -ForegroundColor DarkGray
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -Headers $downloadHeaders
+
+    # Extract the archive (GoReleaser ships windows builds as zip-wrapped exe).
+    Expand-Archive -Path $zipPath -DestinationPath $tempDir -Force
+    Remove-Item $zipPath -Force
+
+    # Locate the extracted exe.
+    $exe = Get-ChildItem -Path $tempDir -Filter "jules-setup.exe" -Recurse | Select-Object -First 1
+    if (-not $exe) {
+        Write-Host "Error: jules-setup.exe not found in archive after extraction." -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "Downloaded to: $($exe.FullName)" -ForegroundColor DarkGray
 
     # Run the installer.
     Write-Host ""
-    & $exePath
+    & $exe.FullName
 }
 catch {
     Write-Host "Error: $_" -ForegroundColor Red
