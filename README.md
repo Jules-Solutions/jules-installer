@@ -9,13 +9,13 @@ Downloads as a single binary (~10MB). Authenticates you, checks your environment
 **macOS / Linux:**
 
 ```sh
-curl -fsSL https://jules.solutions/install | sh
+curl -fsSL https://auth.jules.solutions/install | sh
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm jules.solutions/install | iex
+irm auth.jules.solutions/install | iex
 ```
 
 ## Two Install Tiers
